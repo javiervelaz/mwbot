@@ -10,8 +10,8 @@ echo "==================="
 if [ ! -f .env ]; then
     echo "❌ No se encontró .env — creando plantilla..."
     cat > .env << 'ENV'
-MW_EMAIL=tu_email@hotmail.com
-MW_PASSWORD=tu_password
+MW_EMAIL=javiervelaz@hotmail.com
+MW_PASSWORD="*Javier0"
 HEADLESS=true
 MIN_PAGO=0.05
 MAX_TAREAS_DIA=50
