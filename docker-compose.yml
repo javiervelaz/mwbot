@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  microworkers-bot:
+    build: .
+    container_name: mwbot
+    restart: unless-stopped          # Se reinicia solo si crashea
+    env_file:
+      - .env                         # Lee credenciales del .env
+    volumes:
+      - ./data:/app/data             # DB persiste fuera del contenedor
+      - ./logs:/app/logs             # Logs accesibles desde el host
+      - ./screenshots:/app/screenshots
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"

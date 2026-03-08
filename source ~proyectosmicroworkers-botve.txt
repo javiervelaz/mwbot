@@ -1,0 +1,1 @@
+source ~/proyectos/microworkers-bot/venv/bin/activate
