@@ -57,7 +57,7 @@ def es_automatizable(titulo: str) -> bool:
         return True
 
     # Aceptar TTV de tipo search+visit/engage (sin obtain info, sin screenshot)
-    if texto.startswith("ttv-") or texto.startswith("ttv "):
+    if re.match(r"^\s*ttv\b", texto):
         if any(t in texto for t in TIPOS_TTV_AUTOMATIZABLES):
             return True
 
@@ -68,7 +68,7 @@ async def _extraer_tareas_pagina(page: Page) -> list:
     return await page.evaluate("""
         () => {
             const tareas = [];
-            document.querySelectorAll('div.jobslist').forEach((el) => {
+            document.querySelectorAll("div.jobslist, .jobslist, [id^='campaign']").forEach((el) => {
                 const idAttr = el.id || '';
                 const id = idAttr.replace('campaign', '');
                 const link = el.querySelector('.jobname a');
@@ -96,11 +96,12 @@ async def obtener_tareas(page: Page, min_pago: float = 0.04, max_paginas: int = 
             await page.goto(url, wait_until="networkidle")
             await asyncio.sleep(random.uniform(2, 3))
 
+            lista_selector = "div.jobslist, .jobslist, [id^='campaign']"
             try:
-                await page.wait_for_selector("div.jobslist", timeout=10000)
+                await page.wait_for_selector(lista_selector, timeout=10000)
             except Exception:
-                logger.warning(f"No hay tareas en página {pagina}, deteniendo")
-                break
+                logger.warning(f"No se detectó listado de tareas en página {pagina}, continuando")
+                continue
 
             items_raw = await _extraer_tareas_pagina(page)
             logger.info(f"  Página {pagina}: {len(items_raw)} tareas encontradas")
