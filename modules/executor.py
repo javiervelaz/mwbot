@@ -6,7 +6,7 @@ from loguru import logger
 from playwright.async_api import Page
 from .scraper import Tarea, obtener_detalle_tarea
 from .stealth import scroll_humano, mover_mouse_humano
-from .database import marcar_completada, guardar_tarea
+from .database import marcar_completada, marcar_bloqueada, guardar_tarea
 
 Path("screenshots").mkdir(exist_ok=True)
 
@@ -15,6 +15,7 @@ async def ejecutar_tarea(page: Page, tarea: Tarea) -> bool:
     logger.info(f"Ejecutando tarea: {tarea.titulo[:60]} | Pago: ${tarea.pago:.2f}")
 
     exito = False
+    bloqueada = False
     try:
         titulo = tarea.titulo.lower()
 
@@ -31,7 +32,7 @@ async def ejecutar_tarea(page: Page, tarea: Tarea) -> bool:
                                         "bing", "google", "startpage",
                                         "buscar + clic", "keyword", "palabra clave",
                                         "search + engage", "engage"]):
-            exito = await _tarea_visitar_url(page, tarea)
+            exito, bloqueada = await _tarea_visitar_url(page, tarea)
 
         elif any(t in titulo for t in ["youtube", "watch", "search + watch"]):
             exito = await _tarea_youtube(page, tarea)
@@ -47,6 +48,9 @@ async def ejecutar_tarea(page: Page, tarea: Tarea) -> bool:
     if exito:
         marcar_completada(tarea.id)
         logger.success(f"✓ Tarea completada: {tarea.titulo[:50]}")
+    elif bloqueada:
+        marcar_bloqueada(tarea.id)
+        logger.info(f"⏸ Tarea bloqueada (sin slots): {tarea.titulo[:50]}")
     else:
         guardar_tarea(tarea.id, tarea.titulo, tarea.pago, "manual", tarea.url, "fallida")
         logger.warning(f"✗ Tarea fallida: {tarea.titulo[:50]}")
@@ -54,43 +58,43 @@ async def ejecutar_tarea(page: Page, tarea: Tarea) -> bool:
     return exito
 
 
-async def _tarea_visitar_url(page: Page, tarea: Tarea) -> bool:
+async def _tarea_visitar_url(page: Page, tarea: Tarea):
     """
     Maneja tareas TTV y normales de tipo visit/search.
+    Retorna (exito: bool, bloqueada: bool)
     """
     try:
         detalle = await obtener_detalle_tarea(page, tarea)
 
-        # Tarea expirada o bloqueada
-        if detalle.get("expirada") or detalle.get("bloqueada"):
-            logger.warning(f"Tarea {tarea.id} expirada/bloqueada, saltando")
-            return False
+        if detalle.get("expirada"):
+            logger.warning(f"Tarea {tarea.id} expirada, saltando")
+            return False, False
+
+        if detalle.get("bloqueada"):
+            logger.warning(f"Tarea {tarea.id} sin slots/locked, se reintentará")
+            return False, True
 
         es_ttv = detalle.get("es_ttv", False)
 
         if es_ttv:
-            # Saltar si requiere screenshot o social media
             if detalle.get("pide_screenshot") or detalle.get("pide_social_media"):
                 logger.warning(f"TTV requiere screenshot/social, saltando: {tarea.titulo[:50]}")
                 skip = await page.query_selector("a:has-text('Skip'), button:has-text('Skip')")
                 if skip:
                     await skip.click()
-                    logger.info("Tarea TTV skipeada")
-                return False
+                return False, False
 
             keyword   = detalle.get("keyword", "")
             dominio   = detalle.get("dominio_destino", "")
             url_task  = detalle.get("url_task", "")
-            pide_url  = detalle.get("pide_url", False)
             pide_code = detalle.get("pide_code", False)
 
             if not keyword:
                 logger.warning(f"Sin keyword en tarea TTV {tarea.id}")
-                return False
+                return False, False
 
             logger.info(f"TTV Search: keyword='{keyword}' dominio='{dominio}'")
 
-            # Buscar en Google
             await page.goto(
                 f"https://www.google.com/search?q={keyword.replace(' ', '+')}",
                 wait_until="networkidle"
@@ -108,7 +112,6 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea) -> bool:
                         .filter(h => h.includes('{dominio_limpio}') && h.startsWith('http'))
                 """)
                 if not links_res:
-                    # Intentar página 2
                     await page.goto(
                         f"https://www.google.com/search?q={keyword.replace(' ','+')}&start=10",
                         wait_until="networkidle"
@@ -125,24 +128,21 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea) -> bool:
                     await page.goto(url_visitada, wait_until="networkidle", timeout=30000)
                 else:
                     logger.warning(f"No se encontró dominio {dominio_limpio} en Google")
-                    return False
+                    return False, False
             else:
-                # Sin dominio: click primer resultado orgánico
                 try:
                     await page.locator("div#search a[href^='http']").first.click()
                     await asyncio.sleep(3)
                     url_visitada = page.url
                 except:
                     logger.warning("No se pudo hacer click en resultado")
-                    return False
+                    return False, False
 
-            # Scroll humano en la página visitada
             await asyncio.sleep(random.uniform(20, 35))
             for _ in range(random.randint(3, 5)):
                 await page.evaluate(f"window.scrollBy(0, {random.randint(200, 500)})")
                 await asyncio.sleep(random.uniform(1, 3))
 
-            # Extraer código si lo pide
             codigo = ""
             if pide_code:
                 texto_pag = await page.evaluate("() => document.body.innerText")
@@ -154,14 +154,12 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea) -> bool:
                     codigo = cod.group(1).strip()
                     logger.info(f"Código: {codigo}")
 
-            # Volver a la tarea y submitear
             if url_task:
                 await page.goto(url_task, wait_until="networkidle")
                 await asyncio.sleep(2)
 
                 proof = codigo if codigo else url_visitada
 
-                # Llenar campo de proof
                 campos = await page.query_selector_all("input[type='text'], input[type='url'], textarea")
                 llenado = False
                 for campo in campos:
@@ -176,7 +174,6 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea) -> bool:
                     await campos[0].fill(proof)
                     llenado = True
 
-                # Submit
                 for sel in ["button:has-text('Finish')", "button:has-text('Submit')",
                             "input[type='submit']", ".btn-success", ".btn-primary"]:
                     btn = await page.query_selector(sel)
@@ -186,25 +183,22 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea) -> bool:
                             await btn.click()
                             await asyncio.sleep(3)
                             logger.success(f"✓ TTV submitada: {tarea.titulo[:50]}")
-                            return True
+                            return True, False
 
-            return False
+            return False, False
 
         else:
-            # ── TAREA NORMAL (jobs_details.php) ──
             if detalle.get("expirada"):
-                return False
+                return False, False
 
-            # "Palabra Clave": tiene keyword para buscar
             es_palabra_clave = detalle.get("es_palabra_clave", False)
-            keyword   = detalle.get("keyword", "")
+            keyword     = detalle.get("keyword", "")
             url_destino = detalle.get("url_destino", "")
             instrucciones = detalle.get("instrucciones", "")
 
             if es_palabra_clave and keyword:
                 logger.info(f"Palabra Clave: keyword='{keyword}' url='{url_destino}'")
 
-                # Buscar en Google
                 await page.goto(
                     f"https://www.google.com/search?q={keyword.replace(' ', '+')}",
                     wait_until="networkidle"
@@ -224,28 +218,25 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea) -> bool:
                         url_visitada = links_res[0]
                         await page.goto(url_visitada, wait_until="networkidle", timeout=30000)
                     else:
-                        # Click primer resultado
                         try:
                             await page.locator("div#search a[href^='http']").first.click()
                             await asyncio.sleep(3)
                             url_visitada = page.url
                         except:
-                            return False
+                            return False, False
                 else:
                     try:
                         await page.locator("div#search a[href^='http']").first.click()
                         await asyncio.sleep(3)
                         url_visitada = page.url
                     except:
-                        return False
+                        return False, False
 
-                # Scroll y espera
                 await asyncio.sleep(random.uniform(20, 40))
                 for _ in range(random.randint(3, 5)):
                     await page.evaluate(f"window.scrollBy(0, {random.randint(200, 500)})")
                     await asyncio.sleep(random.uniform(1, 3))
 
-                # Extraer código de verificación
                 texto_pag = await page.evaluate("() => document.body.innerText")
                 cod = (
                     re.search(r'c[oó]digo[:\s]+([A-Z0-9]{3,20})', texto_pag, re.I) or
@@ -255,7 +246,6 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea) -> bool:
                 codigo = cod.group(1).strip() if cod else url_visitada
                 logger.info(f"Proof: {codigo}")
 
-                # Submit a Microworkers
                 job_url = f"https://www.microworkers.com/jobs_details.php?Id={tarea.url.split('Id=')[-1]}"
                 await page.goto(job_url, wait_until="networkidle", timeout=30000)
                 await asyncio.sleep(random.uniform(2, 3))
@@ -269,10 +259,9 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea) -> bool:
                 await page.click("input[name='B1']")
                 await asyncio.sleep(2)
                 logger.success(f"✓ Palabra Clave submitada")
-                return True
+                return True, False
 
             elif url_destino:
-                # Visita simple
                 tiempo = max(15, min(int(''.join(filter(str.isdigit,
                              detalle.get("tiempo_requerido","30"))) or 30), 120))
                 logger.info(f"Visitando: {url_destino} por {tiempo}s")
@@ -306,21 +295,18 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea) -> bool:
                 await page.click("input[name='B1']")
                 await asyncio.sleep(2)
                 logger.success(f"✓ Visita normal submitada")
-                return True
+                return True, False
 
             else:
                 logger.warning(f"Sin URL destino en tarea normal {tarea.id}")
-                return False
+                return False, False
 
     except Exception as e:
         logger.error(f"Error en _tarea_visitar_url: {e}")
-        return False
+        return False, False
 
 
 async def _tarea_search_visit_auto(page: Page, tarea: Tarea) -> bool:
-    """
-    Tarea 'Automatic Verification' (wizardly1.com).
-    """
     try:
         detalle = await obtener_detalle_tarea(page, tarea)
 
@@ -342,7 +328,6 @@ async def _tarea_search_visit_auto(page: Page, tarea: Tarea) -> bool:
         texto = await page.inner_text("body")
         logger.debug(f"Texto wizardly: {texto[:200]}")
 
-        # Detectar error 404
         if "Not Found" in texto or "404" in texto:
             logger.warning(f"wizardly1.com devuelve 404 para tarea {tarea.id}, expirada")
             return False
