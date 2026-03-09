@@ -353,7 +353,7 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                 "texto_completo": texto[:2000],
                 "keyword": keyword,
                 "dominio_destino": dominio,
-                "url_destino": links[0] if links else "",
+                "url_destino": links[0] if links else dominio,
                 "todos_los_links": links,
                 "pide_screenshot": pide_screenshot,
                 "pide_social_media": pide_social,

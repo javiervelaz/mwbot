@@ -114,13 +114,20 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea):
             await scroll_humano(page)
 
             url_visitada = ""
+            if keyword:
+                await page.goto(
+                    _url_buscador(search_engine, keyword),
+                    wait_until="networkidle"
+                )
+                await asyncio.sleep(random.uniform(2, 4))
+                await scroll_humano(page)
 
             if dominio:
-                dominio_limpio = dominio.replace("https://","").replace("http://","").split("/")[0]
+                dominio_limpio = _normalizar_dominio_objetivo(dominio)
                 links_res = await page.evaluate(f"""
                     () => Array.from(document.querySelectorAll('a[href]'))
                         .map(a => a.href)
-                        .filter(h => h.includes('{dominio_limpio}') && h.startsWith('http'))
+                        .filter(h => h.startsWith('http') && h.toLowerCase().includes('{dominio_limpio}'))
                 """)
                 if not links_res:
                     if (search_engine or "google").lower() == "bing":
@@ -137,14 +144,18 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea):
                     links_res = await page.evaluate(f"""
                         () => Array.from(document.querySelectorAll('a[href]'))
                             .map(a => a.href)
-                            .filter(h => h.includes('{dominio_limpio}') && h.startsWith('http'))
+                            .filter(h => h.startsWith('http') && h.toLowerCase().includes('{dominio_limpio}'))
                     """)
                 if links_res:
                     url_visitada = links_res[0]
                     logger.info(f"Resultado: {url_visitada}")
                     await page.goto(url_visitada, wait_until="networkidle", timeout=30000)
+                elif not keyword:
+                    url_visitada = dominio if dominio.startswith("http") else f"https://{dominio_limpio}"
+                    logger.info(f"Sin keyword; visitando dominio directo: {url_visitada}")
+                    await page.goto(url_visitada, wait_until="networkidle", timeout=30000)
                 else:
-                    logger.warning(f"No se encontró dominio {dominio_limpio} en Google")
+                    logger.warning(f"No se encontró dominio {dominio_limpio} en resultados de {search_engine}")
                     return False, False
             else:
                 try:
@@ -172,35 +183,11 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea):
                     logger.info(f"Código: {codigo}")
 
             if url_task:
-                await page.goto(url_task, wait_until="networkidle")
-                await asyncio.sleep(2)
-
                 proof = codigo if codigo else url_visitada
-
-                campos = await page.query_selector_all("input[type='text'], input[type='url'], textarea")
-                llenado = False
-                for campo in campos:
-                    ph = (await campo.get_attribute("placeholder") or "").lower()
-                    fid = (await campo.get_attribute("id") or "").lower()
-                    if any(w in ph+fid for w in ["url", "landing", "paste", "proof", "answer", "code"]):
-                        await campo.fill(proof)
-                        logger.info(f"Campo llenado: {proof[:60]}")
-                        llenado = True
-                        break
-                if not llenado and campos:
-                    await campos[0].fill(proof)
-                    llenado = True
-
-                for sel in ["button:has-text('Finish')", "button:has-text('Submit')",
-                            "input[type='submit']", ".btn-success", ".btn-primary"]:
-                    btn = await page.query_selector(sel)
-                    if btn:
-                        txt = (await btn.inner_text()).lower()
-                        if any(w in txt for w in ["finish","submit","send","enviar","done","complete"]):
-                            await btn.click()
-                            await asyncio.sleep(3)
-                            logger.success(f"✓ TTV submitada: {tarea.titulo[:50]}")
-                            return True, False
+                enviado = await _enviar_proof_ttv(page, url_task, proof)
+                if enviado:
+                    logger.success(f"✓ TTV submitada: {tarea.titulo[:50]}")
+                    return True, False
 
             return False, False
 
