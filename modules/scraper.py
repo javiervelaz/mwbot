@@ -57,7 +57,7 @@ def es_automatizable(titulo: str) -> bool:
         return True
 
     # Aceptar TTV de tipo search+visit/engage (sin obtain info, sin screenshot)
-    if texto.startswith("ttv-") or texto.startswith("ttv "):
+    if re.match(r"^\s*ttv\b", texto):
         if any(t in texto for t in TIPOS_TTV_AUTOMATIZABLES):
             return True
 
@@ -68,7 +68,7 @@ async def _extraer_tareas_pagina(page: Page) -> list:
     return await page.evaluate("""
         () => {
             const tareas = [];
-            document.querySelectorAll('div.jobslist').forEach((el) => {
+            document.querySelectorAll("div.jobslist, .jobslist, [id^='campaign']").forEach((el) => {
                 const idAttr = el.id || '';
                 const id = idAttr.replace('campaign', '');
                 const link = el.querySelector('.jobname a');
@@ -96,11 +96,12 @@ async def obtener_tareas(page: Page, min_pago: float = 0.04, max_paginas: int = 
             await page.goto(url, wait_until="networkidle")
             await asyncio.sleep(random.uniform(2, 3))
 
+            lista_selector = "div.jobslist, .jobslist, [id^='campaign']"
             try:
-                await page.wait_for_selector("div.jobslist", timeout=10000)
+                await page.wait_for_selector(lista_selector, timeout=10000)
             except Exception:
-                logger.warning(f"No hay tareas en página {pagina}, deteniendo")
-                break
+                logger.warning(f"No se detectó listado de tareas en página {pagina}, continuando")
+                continue
 
             items_raw = await _extraer_tareas_pagina(page)
             logger.info(f"  Página {pagina}: {len(items_raw)} tareas encontradas")
@@ -196,6 +197,22 @@ async def _obtener_keyword_dinamica(page: Page, url_keyword: str) -> str:
     return ""
 
 
+def _normalizar_keyword(keyword: str) -> str:
+    texto = (keyword or "").strip().strip("\"'`")
+    texto = re.sub(r"\s+", " ", texto)
+    texto = re.split(r"\b(note|please|step|it will be|you must|do not)\b", texto, flags=re.I)[0].strip()
+    return texto.strip(" .:-")
+
+
+def _detectar_buscador(texto: str, titulo: str) -> str:
+    blob = f"{titulo}\n{texto}".lower()
+    if "bing" in blob:
+        return "bing"
+    if "startpage" in blob:
+        return "startpage"
+    return "google"
+
+
 async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
     """
     Obtiene el detalle completo de una tarea.
@@ -275,16 +292,19 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
 
             logger.debug(f"Texto taskv2 ({len(texto)} chars): {texto[:500]}")
 
-            # ── Extraer keyword ──────────────────────────────────────────
+            # ── Extraer keyword ─────────────────────────────────────────-
             kw_match = (
-                re.search(r'Search(?:ing)?\s+(?:for|keyword)[:\s]*["\']?([^\n"\']{3,80})', texto, re.I) or
-                re.search(r'Search Keyword\s*\n+([^\n]{3,80})', texto, re.I) or
-                re.search(r'keyword\s*(?:is|:)\s*["\']?([^\n"\']{3,80})', texto, re.I) or
-                re.search(r'(?:type|enter|write|use)\s+(?:the\s+)?keyword[:\s]+([^\n]{3,80})', texto, re.I) or
-                re.search(r'search\s+(?:for\s+)?["\']([^"\']{3,80})["\']', texto, re.I) or
-                re.search(r'Step\s*1[^:]*:\s*(?:Search|Go to)[^:]*["\']([^"\']{3,80})["\']', texto, re.I)
+                re.search(r'Search(?:ing)?\s+(?:for|keyword)[:\s]*["\']?([^\n"\']{3,120})', texto, re.I) or
+                re.search(r'perform\s+a\s+search\s+on\s+(?:google|bing|startpage)[^:\n]*:\s*([^\n]{3,120})', texto, re.I) or
+                re.search(r'(?:on\s+)?(?:google|bing|startpage)\s*(?:bar|search)?[^:\n]*:\s*([^\n]{3,120})', texto, re.I) or
+                re.search(r'Search Keyword\s*\n+([^\n]{3,120})', texto, re.I) or
+                re.search(r'keyword\s*(?:is|:)\s*["\']?([^\n"\']{3,120})', texto, re.I) or
+                re.search(r'(?:type|enter|write|use)\s+(?:the\s+)?keyword[:\s]+([^\n]{3,120})', texto, re.I) or
+                re.search(r'search\s+(?:for\s+)?["\']([^"\']{3,120})["\']', texto, re.I) or
+                re.search(r'Step\s*1[^:]*:\s*(?:Search|Go to)[^:]*["\']([^"\']{3,120})["\']', texto, re.I)
             )
-            keyword = kw_match.group(1).strip().strip('"\'') if kw_match else ""
+            keyword = _normalizar_keyword(kw_match.group(1)) if kw_match else ""
+            search_engine = _detectar_buscador(texto, tarea.titulo)
 
             # ── Extraer dominio destino ──────────────────────────────────
             dom_match = (
@@ -324,7 +344,7 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
             pide_url        = bool(re.search(r'landing page url|paste.*url', texto, re.I))
             pide_code       = bool(re.search(r'\bcode\b|código', texto, re.I))
 
-            logger.info(f"  keyword='{keyword}' dominio='{dominio}'")
+            logger.info(f"  keyword='{keyword}' dominio='{dominio}' buscador='{search_engine}'")
             logger.info(f"  screenshot={pide_screenshot} social={pide_social} url={pide_url} code={pide_code} links={links[:3]}")
 
             return {
@@ -340,6 +360,7 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                 "pide_url": pide_url,
                 "pide_code": pide_code,
                 "tiempo_requerido": "30",
+                "search_engine": search_engine,
             }
 
         # ─────────────────────────────────────────
@@ -362,6 +383,7 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                     "url_destino": "",
                     "todos_los_links": [],
                     "tiempo_requerido": "30",
+                    "search_engine": "google",
                 }
 
             # Para otros tipos normales, extraer URL del jobdetailsbox
@@ -391,7 +413,8 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                 }
             """)
 
-            logger.info(f"  Normal: {len(detalle.get('todos_los_links',[]))} links, url='{detalle.get('url_destino','')}'")
+            detalle['search_engine'] = _detectar_buscador(detalle.get('instrucciones', ''), tarea.titulo)
+            logger.info(f"  Normal: {len(detalle.get('todos_los_links',[]))} links, url='{detalle.get('url_destino','')}' buscador='{detalle['search_engine']}'")
             return detalle
 
     except Exception as e:

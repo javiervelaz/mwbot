@@ -11,6 +11,16 @@ from .database import marcar_completada, marcar_bloqueada, guardar_tarea
 Path("screenshots").mkdir(exist_ok=True)
 
 
+def _url_buscador(search_engine: str, keyword: str) -> str:
+    q = keyword.replace(" ", "+")
+    engine = (search_engine or "google").lower()
+    if engine == "bing":
+        return f"https://www.bing.com/search?q={q}"
+    if engine == "startpage":
+        return f"https://www.startpage.com/sp/search?query={q}"
+    return f"https://www.google.com/search?q={q}"
+
+
 async def ejecutar_tarea(page: Page, tarea: Tarea) -> bool:
     logger.info(f"Ejecutando tarea: {tarea.titulo[:60]} | Pago: ${tarea.pago:.2f}")
 
@@ -88,15 +98,16 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea):
             dominio   = detalle.get("dominio_destino", "")
             url_task  = detalle.get("url_task", "")
             pide_code = detalle.get("pide_code", False)
+            search_engine = detalle.get("search_engine", "google")
 
             if not keyword:
                 logger.warning(f"Sin keyword en tarea TTV {tarea.id}")
                 return False, False
 
-            logger.info(f"TTV Search: keyword='{keyword}' dominio='{dominio}'")
+            logger.info(f"TTV Search: keyword='{keyword}' dominio='{dominio}' buscador='{search_engine}'")
 
             await page.goto(
-                f"https://www.google.com/search?q={keyword.replace(' ', '+')}",
+                _url_buscador(search_engine, keyword),
                 wait_until="networkidle"
             )
             await asyncio.sleep(random.uniform(2, 4))
@@ -112,10 +123,16 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea):
                         .filter(h => h.includes('{dominio_limpio}') && h.startsWith('http'))
                 """)
                 if not links_res:
-                    await page.goto(
-                        f"https://www.google.com/search?q={keyword.replace(' ','+')}&start=10",
-                        wait_until="networkidle"
-                    )
+                    if (search_engine or "google").lower() == "bing":
+                        await page.goto(
+                            f"https://www.bing.com/search?q={keyword.replace(' ','+')}&first=11",
+                            wait_until="networkidle"
+                        )
+                    else:
+                        await page.goto(
+                            f"https://www.google.com/search?q={keyword.replace(' ','+')}&start=10",
+                            wait_until="networkidle"
+                        )
                     await asyncio.sleep(2)
                     links_res = await page.evaluate(f"""
                         () => Array.from(document.querySelectorAll('a[href]'))
@@ -195,12 +212,13 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea):
             keyword     = detalle.get("keyword", "")
             url_destino = detalle.get("url_destino", "")
             instrucciones = detalle.get("instrucciones", "")
+            search_engine = detalle.get("search_engine", "google")
 
             if es_palabra_clave and keyword:
-                logger.info(f"Palabra Clave: keyword='{keyword}' url='{url_destino}'")
+                logger.info(f"Palabra Clave: keyword='{keyword}' url='{url_destino}' buscador='{search_engine}'")
 
                 await page.goto(
-                    f"https://www.google.com/search?q={keyword.replace(' ', '+')}",
+                    _url_buscador(search_engine, keyword),
                     wait_until="networkidle"
                 )
                 await asyncio.sleep(random.uniform(2, 4))
@@ -344,9 +362,10 @@ async def _tarea_search_visit_auto(page: Page, tarea: Tarea) -> bool:
 
         keyword = kw.group(1).strip()
         url_destino = detalle.get("url_destino", "")
-        logger.info(f"Keyword: '{keyword}'")
+        search_engine = detalle.get("search_engine", "google")
+        logger.info(f"Keyword: '{keyword}' buscador='{search_engine}'")
 
-        await page.goto(f"https://www.google.com/search?q={keyword.replace(' ', '+')}",
+        await page.goto(_url_buscador(search_engine, keyword),
                         wait_until="networkidle", timeout=30000)
         await asyncio.sleep(random.uniform(2, 4))
         await scroll_humano(page)
