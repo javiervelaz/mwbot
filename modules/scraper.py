@@ -182,10 +182,9 @@ async def _obtener_keyword_dinamica(page: Page, url_keyword: str) -> str:
             logger.info(f"Keyword dinámica extraída: '{keyword}'")
             return keyword
 
-        # Heurística: línea más corta y razonable (keywords son frases cortas)
+        # Heurística: preferir frases cortas sin puntos ni URLs
         lineas = [l.strip() for l in texto.split('\n') if 5 < len(l.strip()) < 80]
         if lineas:
-            # Preferir líneas que parecen búsquedas (sin puntos, sin URLs)
             candidatos = [l for l in lineas if '.' not in l and 'http' not in l]
             if candidatos:
                 keyword = min(candidatos, key=len)
@@ -199,9 +198,11 @@ async def _obtener_keyword_dinamica(page: Page, url_keyword: str) -> str:
 
 async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
     """
-    Obtiene el detalle completo de una tarea:
-    - TTV: navega al preview, acepta, extrae instrucciones de taskv2.
-    - Normal (Automatic Verification): extrae URL de wizardly1.com del texto.
+    Obtiene el detalle completo de una tarea.
+    - TTV: navega al preview, acepta, verifica errores en body Y en URL,
+      luego extrae instrucciones de taskv2.
+    - Normal (Automatic Verification): devuelve flag para que el executor
+      construya la URL de wizardly1.com directamente.
     """
     try:
         await page.goto(tarea.url, wait_until="networkidle")
@@ -220,9 +221,9 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                 logger.warning(f"Tarea {tarea.id} expiró (Campaign Not found)")
                 return {"expirada": True, "es_ttv": True}
 
-            # Error de slot antes de aceptar
+            # Sin slots ANTES de aceptar
             if "TTVSlot-E0002" in body_text:
-                logger.warning(f"Tarea {tarea.id} sin slots disponibles")
+                logger.warning(f"Tarea {tarea.id} sin slots disponibles (pre-click)")
                 return {"bloqueada": True, "es_ttv": True}
 
             btn = await page.query_selector("button.btn.btn-primary")
@@ -240,32 +241,41 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                 logger.warning(f"Tarea {tarea.id} ya fue aceptada/bloqueada")
                 return {"bloqueada": True, "es_ttv": True}
 
-            # Redirigió de vuelta a ttv con error: tarea expirada o sin slot post-click
+            # Error en la URL de redirección
             if "ttv.microworkers.com" in url_task and "error=" in url_task:
                 error_match = re.search(r'error=([^&]+)', url_task)
                 error_msg = error_match.group(1) if error_match else "desconocido"
-                logger.warning(f"Tarea {tarea.id} error post-accept: {error_msg}")
+                logger.warning(f"Tarea {tarea.id} error post-accept en URL: {error_msg}")
                 return {"expirada": True, "es_ttv": True}
 
-            # Verificar que llegamos a taskv2
-            if "taskv2.microworkers.com" not in url_task and "ttv.microworkers.com" not in url_task:
-                logger.warning(f"Tarea {tarea.id} URL inesperada: {url_task}")
+            # *** FIX CLAVE: verificar body post-click aunque URL no cambie ***
+            # Microworkers a veces devuelve el error en el body sin redirigir
+            texto_post_click = await page.evaluate("() => document.body.innerText")
+            if "TTVSlot-E0002" in texto_post_click:
+                logger.warning(f"Tarea {tarea.id} sin slots (E0002 en body post-click)")
+                return {"bloqueada": True, "es_ttv": True}
+            if "TTVJob-E0002" in texto_post_click or "has expired" in texto_post_click.lower():
+                logger.warning(f"Tarea {tarea.id} expirada (error en body post-click)")
                 return {"expirada": True, "es_ttv": True}
 
-            # Esperar que cargue el contenido (puede ser React/Vue)
+            # Si no llegó a taskv2, algo salió mal
+            if "taskv2.microworkers.com" not in url_task:
+                logger.warning(f"Tarea {tarea.id} no redirigió a taskv2 (URL: {url_task})")
+                return {"expirada": True, "es_ttv": True}
+
+            # Esperar render React/Vue
             await asyncio.sleep(random.uniform(2, 4))
             texto = await page.evaluate("() => document.body.innerText")
 
-            # Si el texto está vacío o muy corto, esperar más
+            # Si el texto es muy corto esperar más
             if len(texto.strip()) < 100:
                 logger.debug(f"Texto corto ({len(texto)} chars), esperando render...")
-                await asyncio.sleep(3)
+                await asyncio.sleep(4)
                 texto = await page.evaluate("() => document.body.innerText")
 
             logger.debug(f"Texto taskv2 ({len(texto)} chars): {texto[:500]}")
 
             # ── Extraer keyword ──────────────────────────────────────────
-            # Orden de prioridad: patrones específicos primero
             kw_match = (
                 re.search(r'Search(?:ing)?\s+(?:for|keyword)[:\s]*["\']?([^\n"\']{3,80})', texto, re.I) or
                 re.search(r'Search Keyword\s*\n+([^\n]{3,80})', texto, re.I) or
@@ -342,9 +352,7 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                 logger.warning(f"Tarea {tarea.id} no existe (Job not found)")
                 return {"expirada": True, "es_ttv": False}
 
-            # Para Automatic Verification, la URL de wizardly1.com se construye
-            # directamente en el executor — no necesitamos parsear nada del HTML.
-            # Solo verificamos que la tarea existe y es del tipo correcto.
+            # Para Automatic Verification la URL se construye en el executor
             if "automatic verification" in tarea.titulo.lower():
                 logger.info(f"  Automatic Verification: se usará wizardly1.com con id={tarea.id}")
                 return {
@@ -356,7 +364,7 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                     "tiempo_requerido": "30",
                 }
 
-            # Para otros tipos normales, intentar extraer URL del jobdetailsbox
+            # Para otros tipos normales, extraer URL del jobdetailsbox
             detalle = await page.evaluate("""
                 () => {
                     const jobbox = document.querySelector('.jobdetailsbox');
@@ -365,7 +373,6 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                             .map(a => a.href)
                             .filter(h => h.startsWith('http') && !h.includes('microworkers'))
                         : [];
-                    // También buscar links en el body completo si jobbox no tiene
                     const allLinks = Array.from(document.querySelectorAll('a[href]'))
                         .map(a => a.href)
                         .filter(h => h.startsWith('http')
