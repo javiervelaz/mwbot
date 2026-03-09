@@ -12,6 +12,8 @@ sesiones_table = db.table("sesiones")
 Tarea = Query()
 Sesion = Query()
 
+BLOQUEADA_COOLDOWN_HORAS = int(os.getenv("BLOQUEADA_COOLDOWN_HORAS", "2"))
+
 def init_db():
     logger.info("Base de datos inicializada (tinydb)")
 
@@ -29,12 +31,18 @@ def depurar_db():
         tareas_table.update({"estado": "fallida"}, Tarea.estado == "pendiente")
         logger.info(f"DB depurada: {len(pendientes)} tareas pendientes → fallidas")
 
-    # 2. Bloqueadas (sin slots / locked-jobs) → eliminar siempre para reintentar
-    bloqueadas = tareas_table.search(Tarea.estado == "bloqueada")
-    if bloqueadas:
-        ids_bloqueadas = [t.doc_id for t in bloqueadas]
+    # 2. Bloqueadas antiguas → eliminar para reintentar (cooldown)
+    hace_cooldown = (datetime.now() - timedelta(hours=BLOQUEADA_COOLDOWN_HORAS)).isoformat()
+    bloqueadas_viejas = tareas_table.search(
+        (Tarea.estado == "bloqueada") & (Tarea.fecha < hace_cooldown)
+    )
+    if bloqueadas_viejas:
+        ids_bloqueadas = [t.doc_id for t in bloqueadas_viejas]
         tareas_table.remove(doc_ids=ids_bloqueadas)
-        logger.info(f"DB depurada: {len(bloqueadas)} tareas bloqueadas eliminadas (reintentables)")
+        logger.info(
+            f"DB depurada: {len(bloqueadas_viejas)} tareas bloqueadas antiguas "
+            f"(>{BLOQUEADA_COOLDOWN_HORAS}h) eliminadas"
+        )
 
     # 3. Fallidas viejas (> 6 horas) → eliminar para reintentarlas
     hace_6h = (datetime.now() - timedelta(hours=6)).isoformat()
@@ -53,14 +61,24 @@ def depurar_db():
 
 def tarea_ya_procesada(tarea_id: str) -> bool:
     """
-    Bloquea: completada, fallida (reciente), pendiente.
-    NO bloquea: bloqueada (se limpian al arrancar y se reintenta).
+    Bloquea siempre: completada, fallida (reciente), pendiente.
+    Bloquea temporalmente: bloqueada (cooldown), para no perder sesiones
+    reintentando tareas sin slots una y otra vez.
     """
-    resultado = tareas_table.search(
+    resultado_fijo = tareas_table.search(
         (Tarea.id == tarea_id) &
         (Tarea.estado.one_of(["completada", "fallida", "pendiente"]))
     )
-    return len(resultado) > 0
+    if resultado_fijo:
+        return True
+
+    hace_cooldown = (datetime.now() - timedelta(hours=BLOQUEADA_COOLDOWN_HORAS)).isoformat()
+    bloqueada_reciente = tareas_table.search(
+        (Tarea.id == tarea_id) &
+        (Tarea.estado == "bloqueada") &
+        (Tarea.fecha >= hace_cooldown)
+    )
+    return len(bloqueada_reciente) > 0
 
 def guardar_tarea(tarea_id, titulo, pago, tipo, url, estado="pendiente"):
     existente = tareas_table.search(Tarea.id == tarea_id)
@@ -82,9 +100,9 @@ def marcar_completada(tarea_id: str):
 
 def marcar_bloqueada(tarea_id: str):
     """
-    Sin slots / locked-jobs: temporal, se elimina al inicio de la próxima sesión.
+    Sin slots / locked-jobs: temporal, entra en cooldown para no reintentar de inmediato.
     """
-    tareas_table.update({"estado": "bloqueada"}, Tarea.id == tarea_id)
+    tareas_table.update({"estado": "bloqueada", "fecha": datetime.now().isoformat()}, Tarea.id == tarea_id)
 
 def guardar_sesion(tareas_completadas: int, ganancias: float):
     sesiones_table.insert({
