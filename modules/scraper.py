@@ -18,7 +18,6 @@ TIPOS_AUTOMATIZABLES = [
 # Tipos TTV que aceptamos intentar
 TIPOS_TTV_AUTOMATIZABLES = [
     "search + visit",
-    "search + engage",
     "search+visit",
     "buscar + visitar",
 ]
@@ -34,6 +33,13 @@ EXCLUIR_SI_CONTIENE = [
     "fill", "form", "quiz",
 ]
 
+
+
+# TTV de baja señal/alta tasa de lock para este bot
+EXCLUIR_TTV_TITULO = [
+    "int page",
+    "+ bonus",
+]
 
 @dataclass
 class Tarea:
@@ -280,15 +286,9 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                 logger.warning(f"Tarea {tarea.id} no redirigió a taskv2 (URL: {url_task})")
                 return {"expirada": True, "es_ttv": True}
 
-            # Esperar render React/Vue
+            # Esperar render React/Vue y enriquecer texto si viene incompleto
             await asyncio.sleep(random.uniform(2, 4))
-            texto = await page.evaluate("() => document.body.innerText")
-
-            # Si el texto es muy corto esperar más
-            if len(texto.strip()) < 100:
-                logger.debug(f"Texto corto ({len(texto)} chars), esperando render...")
-                await asyncio.sleep(4)
-                texto = await page.evaluate("() => document.body.innerText")
+            texto = await _extraer_texto_ttv_enriquecido(page)
 
             logger.debug(f"Texto taskv2 ({len(texto)} chars): {texto[:500]}")
 
@@ -337,6 +337,11 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                     keyword = await _obtener_keyword_dinamica(page, links[0])
                     await page.goto(url_task, wait_until="networkidle")
                     await asyncio.sleep(1)
+
+            # Si no hay señales mínimas, tratar como temporal/no lista
+            if not keyword and not dominio and not links:
+                logger.warning(f"Tarea {tarea.id} sin datos útiles (render incompleto o tarea opaca), aplazando")
+                return {"bloqueada": True, "es_ttv": True, "sin_datos": True}
 
             # ── Flags de proof requerido ─────────────────────────────────
             pide_screenshot = bool(re.search(r'screenshot', texto, re.I))
