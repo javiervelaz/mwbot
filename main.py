@@ -1,11 +1,15 @@
 import asyncio
 import random
 import os
+import sys
 from dotenv import load_dotenv
 from loguru import logger
 from playwright.async_api import async_playwright
 
-from modules.database import init_db, depurar_db, guardar_sesion, resumen_ganancias
+from modules.database import (
+    init_db, depurar_db, guardar_sesion, resumen_ganancias,
+    limpiar_tareas_procesadas, reset_db_total
+)
 from modules.auth import login, verificar_sesion_activa
 from modules.scraper import obtener_tareas
 from modules.executor import ejecutar_tarea
@@ -106,6 +110,12 @@ async def correr_sesion():
 
 async def main():
     init_db()
+
+    if os.getenv("RESET_DB_TOTAL_AL_INICIO", "false").lower() == "true":
+        reset_db_total()
+    elif os.getenv("RESET_TAREAS_AL_INICIO", "false").lower() == "true":
+        limpiar_tareas_procesadas()
+
     depurar_db()  # ← limpia pendientes atascadas al arrancar
 
     logger.info("Bot iniciado en modo 24/7")
@@ -122,4 +132,11 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    if len(sys.argv) > 1 and sys.argv[1] in ("clean-processed", "reset-db"):
+        init_db()
+        if sys.argv[1] == "clean-processed":
+            limpiar_tareas_procesadas()
+        else:
+            reset_db_total()
+    else:
+        asyncio.run(main())
