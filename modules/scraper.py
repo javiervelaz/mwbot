@@ -219,6 +219,39 @@ def _detectar_buscador(texto: str, titulo: str) -> str:
     return "google"
 
 
+async def _extraer_texto_ttv_enriquecido(page: Page) -> str:
+    """Intenta recuperar más texto útil cuando taskv2 aún no renderiza completo."""
+    texto = await page.evaluate("() => document.body.innerText")
+    if len(texto.strip()) > 450:
+        return texto
+
+    # Espera render adicional
+    await asyncio.sleep(5)
+    texto2 = await page.evaluate("() => document.body.innerText")
+    if len(texto2.strip()) > len(texto.strip()):
+        texto = texto2
+
+    # Extrae secciones que a veces quedan fuera del body principal
+    extra = await page.evaluate("""
+        () => {
+            const sels = ['.task-description', '.instructions', '.task-card', '.content', '#app'];
+            const parts = [];
+            for (const sel of sels) {
+                for (const el of document.querySelectorAll(sel)) {
+                    const t = (el.innerText || '').trim();
+                    if (t.length > 20) parts.push(t);
+                }
+            }
+            return parts.join('\n');
+        }
+    """)
+
+    if extra:
+        texto = (texto + "\n" + extra).strip()
+
+    return texto
+
+
 async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
     """
     Obtiene el detalle completo de una tarea.

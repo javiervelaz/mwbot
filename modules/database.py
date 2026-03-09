@@ -118,3 +118,26 @@ def resumen_ganancias() -> dict:
     total = sum(s["ganancias"] for s in todas)
     hoy_total = sum(s["ganancias"] for s in todas if s["fecha"].startswith(hoy))
     return {"total": total, "hoy": hoy_total}
+
+def limpiar_tareas_procesadas():
+    """Elimina tareas marcadas como procesadas para permitir re-scrapeo inmediato."""
+    estados = ["completada", "fallida", "pendiente", "bloqueada"]
+    procesadas = tareas_table.search(Tarea.estado.one_of(estados))
+    if not procesadas:
+        logger.info("DB: no hay tareas procesadas para limpiar")
+        return 0
+
+    ids = [t.doc_id for t in procesadas]
+    tareas_table.remove(doc_ids=ids)
+    logger.warning(f"DB: limpiadas {len(ids)} tareas procesadas ({', '.join(estados)})")
+    return len(ids)
+
+
+def reset_db_total():
+    """Limpia tablas de tareas y sesiones."""
+    cant_tareas = len(tareas_table)
+    cant_sesiones = len(sesiones_table)
+    tareas_table.truncate()
+    sesiones_table.truncate()
+    logger.warning(f"DB reset total: {cant_tareas} tareas y {cant_sesiones} sesiones eliminadas")
+    return {"tareas": cant_tareas, "sesiones": cant_sesiones}

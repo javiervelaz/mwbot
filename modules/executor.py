@@ -21,6 +21,55 @@ def _url_buscador(search_engine: str, keyword: str) -> str:
     return f"https://www.google.com/search?q={q}"
 
 
+
+
+def _normalizar_dominio_objetivo(dominio: str) -> str:
+    d = (dominio or "").lower().strip()
+    d = d.replace("https://", "").replace("http://", "").split("/")[0]
+    d = d.replace("www.", "")
+    d = d.replace("*", "")
+    return d
+
+
+async def _enviar_proof_ttv(page: Page, url_task: str, proof: str) -> bool:
+    if not url_task:
+        return False
+
+    await page.goto(url_task, wait_until="networkidle")
+    await asyncio.sleep(2)
+
+    campos = await page.query_selector_all("input[type='text'], input[type='url'], textarea")
+    if not campos:
+        logger.warning("No se encontraron campos de proof en la tarea TTV")
+        return False
+
+    llenado = False
+    for campo in campos:
+        ph = ((await campo.get_attribute("placeholder")) or "").lower()
+        fid = ((await campo.get_attribute("id")) or "").lower()
+        name = ((await campo.get_attribute("name")) or "").lower()
+        if any(w in (ph + fid + name) for w in ["url", "landing", "paste", "proof", "answer", "code"]):
+            await campo.fill(proof)
+            llenado = True
+            break
+
+    if not llenado:
+        await campos[0].fill(proof)
+
+    for sel in ["button:has-text('Finish')", "button:has-text('Submit')", "input[type='submit']", ".btn-success", ".btn-primary"]:
+        btn = await page.query_selector(sel)
+        if not btn:
+            continue
+
+        txt = (await btn.inner_text() or "").lower().strip()
+        val = ((await btn.get_attribute("value")) or "").lower().strip()
+        if any(w in (txt + " " + val) for w in ["finish", "submit", "send", "enviar", "done", "complete"]):
+            await btn.click()
+            await asyncio.sleep(3)
+            return True
+
+    return False
+
 async def ejecutar_tarea(page: Page, tarea: Tarea) -> bool:
     logger.info(f"Ejecutando tarea: {tarea.titulo[:60]} | Pago: ${tarea.pago:.2f}")
 
@@ -101,17 +150,17 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea):
             search_engine = detalle.get("search_engine", "google")
 
             if not keyword:
-                logger.warning(f"Sin keyword en tarea TTV {tarea.id}")
-                return False, False
+                if dominio or detalle.get("url_destino", ""):
+                    logger.warning(f"Sin keyword en TTV {tarea.id}; usando fallback directo por dominio/url")
+                    keyword = ""
+                elif detalle.get("sin_datos"):
+                    logger.warning(f"Sin datos de instrucciones en TTV {tarea.id}; reintento diferido")
+                    return False, True
+                else:
+                    logger.warning(f"Sin keyword en tarea TTV {tarea.id}")
+                    return False, False
 
             logger.info(f"TTV Search: keyword='{keyword}' dominio='{dominio}' buscador='{search_engine}'")
-
-            await page.goto(
-                _url_buscador(search_engine, keyword),
-                wait_until="networkidle"
-            )
-            await asyncio.sleep(random.uniform(2, 4))
-            await scroll_humano(page)
 
             url_visitada = ""
             if keyword:
@@ -129,7 +178,7 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea):
                         .map(a => a.href)
                         .filter(h => h.startsWith('http') && h.toLowerCase().includes('{dominio_limpio}'))
                 """)
-                if not links_res:
+                if not links_res and keyword:
                     if (search_engine or "google").lower() == "bing":
                         await page.goto(
                             f"https://www.bing.com/search?q={keyword.replace(' ','+')}&first=11",
