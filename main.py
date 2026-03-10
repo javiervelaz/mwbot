@@ -30,6 +30,7 @@ async def correr_sesion():
     min_pago   = float(os.getenv("MIN_PAGO", "0.05"))
     delay_min  = int(os.getenv("DELAY_MIN", "5"))
     delay_max  = int(os.getenv("DELAY_MAX", "20"))
+    max_intentos_factor = int(os.getenv("MAX_INTENTOS_FACTOR", "3"))
 
     logger.info("=" * 50)
     logger.info("🤖 Iniciando sesión del bot Microworkers")
@@ -66,13 +67,25 @@ async def correr_sesion():
                 logger.warning("No hay tareas automatizables disponibles.")
                 return
 
-            limite = min(len(tareas), max_tareas)
-            logger.info(f"Vamos a ejecutar hasta {limite} tareas")
+            max_intentos = min(len(tareas), max_tareas * max_intentos_factor)
+            logger.info(
+                f"Objetivo: completar hasta {max_tareas} tareas "
+                f"(máx intentos={max_intentos}, factor={max_intentos_factor})"
+            )
 
-            for i, tarea in enumerate(tareas[:max_tareas]):
-                logger.info(f"\n--- Tarea {i+1} de {limite} ---")
+            intentos = 0
+            for tarea in tareas:
+                if tareas_completadas >= max_tareas:
+                    logger.info("Objetivo de tareas completadas alcanzado")
+                    break
+                if intentos >= max_intentos:
+                    logger.info("Se alcanzó el máximo de intentos configurado para la sesión")
+                    break
 
-                if i > 0 and i % 10 == 0:
+                intentos += 1
+                logger.info(f"\n--- Intento {intentos} de {max_intentos} ---")
+
+                if intentos > 1 and intentos % 10 == 0:
                     sesion_ok = await verificar_sesion_activa(page)
                     if not sesion_ok:
                         logger.warning("Sesión expirada, reintentando login...")

@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 import random
 from dataclasses import dataclass
@@ -154,13 +155,21 @@ async def obtener_tareas(page: Page, min_pago: float = 0.04, max_paginas: int = 
                 break
             await asyncio.sleep(random.uniform(1, 2))
 
-        # Ordenar: Automatic Verification primero (más confiables), luego por pago
+        # Ordenar por confiabilidad:
+        # 1) Automatic Verification
+        # 2) No-TTV
+        # 3) pago
         tareas.sort(key=lambda t: (
-            2 if "automatic verification" in t.titulo.lower() else 1,
+            3 if "automatic verification" in t.titulo.lower() else (2 if not t.es_ttv else 1),
             t.pago
         ), reverse=True)
 
-        logger.info(f"Tareas automatizables encontradas: {len(tareas)}")
+        tareas_ttv = sum(1 for t in tareas if t.es_ttv)
+        tareas_auto = sum(1 for t in tareas if "automatic verification" in t.titulo.lower())
+        logger.info(
+            f"Tareas automatizables encontradas: {len(tareas)} "
+            f"(auto_verification={tareas_auto}, ttv={tareas_ttv})"
+        )
         for t in tareas[:15]:
             logger.info(f"  → ${t.pago:.2f} | {t.titulo[:60]}")
         return tareas
