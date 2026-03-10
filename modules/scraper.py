@@ -106,6 +106,7 @@ def es_automatizable(titulo: str) -> bool:
         if not ENABLE_TTV_AUTOMATION:
             return False
         if any(x in texto for x in EXCLUIR_TTV_TITULO):
+            return False
     # Aceptar TTV de tipo search+visit/engage (sin obtain info, sin screenshot)
     if re.match(r"^\s*ttv\b", texto):
         if any(e in texto for e in EXCLUIR_TTV_TITULO):
