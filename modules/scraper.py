@@ -92,6 +92,7 @@ def es_automatizable(titulo: str) -> bool:
     if matcher is None:
         matcher = lambda txt, pat: pat in txt
     if any(matcher(texto, e) for e in EXCLUIR_SI_CONTIENE):
+        return False
     # Excluir siempre primero
     if any(_match_patron_texto(texto, e) for e in EXCLUIR_SI_CONTIENE):
         return False
