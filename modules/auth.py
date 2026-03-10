@@ -26,12 +26,14 @@ async def login(page: Page) -> bool:
     logger.info(f"Intentando login con {email}...")
 
     try:
-        await page.goto("https://microworkers.com/login.php", wait_until="networkidle")
+        await page.goto("https://www.microworkers.com/login.php", wait_until="networkidle")
         await asyncio.sleep(random.uniform(1.5, 3.0))
 
         email_selector = "input#Email, input#email, input[name='Email'], input[name='email'], input[type='email']"
         password_selector = "input#Password, input#password, input[name='Password'], input[name='password'], input[type='password']"
 
+        # Esperar que el formulario esté realmente cargado
+        await page.wait_for_selector("form", timeout=15000)
         await page.wait_for_selector(email_selector, timeout=15000)
 
         await page.click(email_selector)

@@ -3,10 +3,13 @@ import os
 import re
 import random
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List
 from loguru import logger
 from playwright.async_api import Page
 from .database import tarea_ya_procesada, guardar_tarea
+
+Path("screenshots").mkdir(exist_ok=True)
 
 # ─────────────────────────────────────────────
 # Tipos que SÍ podemos automatizar
@@ -48,11 +51,13 @@ EXCLUIR_SI_CONTIENE = [
 
 
 
+
 # TTV de baja señal/alta tasa de lock para este bot
 EXCLUIR_TTV_TITULO = [
     "int page",
     "+ bonus",
 ]
+
 
 ENABLE_TTV_AUTOMATION = os.getenv("ENABLE_TTV_AUTOMATION", "false").lower() == "true"
 
@@ -87,6 +92,8 @@ def es_automatizable(titulo: str) -> bool:
     if matcher is None:
         matcher = lambda txt, pat: pat in txt
     if any(matcher(texto, e) for e in EXCLUIR_SI_CONTIENE):
+    # Excluir siempre primero
+    if any(_match_patron_texto(texto, e) for e in EXCLUIR_SI_CONTIENE):
         return False
 
     # Aceptar Automatic Verification (normal, muy confiable)
@@ -98,6 +105,9 @@ def es_automatizable(titulo: str) -> bool:
         if not ENABLE_TTV_AUTOMATION:
             return False
         if any(x in texto for x in EXCLUIR_TTV_TITULO):
+    # Aceptar TTV de tipo search+visit/engage (sin obtain info, sin screenshot)
+    if re.match(r"^\s*ttv\b", texto):
+        if any(e in texto for e in EXCLUIR_TTV_TITULO):
             return False
         if any(t in texto for t in TIPOS_TTV_AUTOMATIZABLES):
             return True
@@ -203,6 +213,9 @@ async def obtener_tareas(page: Page, min_pago: float = 0.04, max_paginas: int = 
         logger.info(
             f"Tareas automatizables encontradas: {len(tareas)} "
             f"(auto_verification={tareas_auto}, no_ttv={tareas_no_ttv}, ttv={tareas_ttv})"
+        logger.info(
+            f"Tareas automatizables encontradas: {len(tareas)} "
+            f"(auto_verification={tareas_auto}, ttv={tareas_ttv})"
         )
         for t in tareas[:15]:
             logger.info(f"  → ${t.pago:.2f} | {t.titulo[:60]}")
@@ -340,8 +353,11 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
             url_task = page.url
             logger.info(f"  Post-accept: {url_task}")
 
-            # Redirigió a locked-jobs: ya fue aceptada/bloqueada antes
+            # Redirigió a locked-jobs
             if "locked-jobs" in url_task:
+                if "error=" in url_task:
+                    logger.warning(f"Tarea {tarea.id} error de plataforma post-accept ({url_task}), no reintentar")
+                    return {"expirada": True, "es_ttv": True}
                 logger.warning(f"Tarea {tarea.id} ya fue aceptada/bloqueada")
                 return {"bloqueada": True, "es_ttv": True}
 
