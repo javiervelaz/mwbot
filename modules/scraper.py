@@ -212,9 +212,7 @@ async def obtener_tareas(page: Page, min_pago: float = 0.04, max_paginas: int = 
         tareas_ttv = sum(1 for t in tareas if t.es_ttv)
         tareas_auto = sum(1 for t in tareas if "automatic verification" in t.titulo.lower())
         tareas_no_ttv = len(tareas) - tareas_ttv
-        logger.info(
-            f"Tareas automatizables encontradas: {len(tareas)} "
-            f"(auto_verification={tareas_auto}, no_ttv={tareas_no_ttv}, ttv={tareas_ttv})"
+        
         logger.info(
             f"Tareas automatizables encontradas: {len(tareas)} "
             f"(auto_verification={tareas_auto}, ttv={tareas_ttv})"
