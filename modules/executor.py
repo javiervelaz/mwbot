@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import random
+from urllib.parse import urlparse, parse_qs
 import os
 from pathlib import Path
 from loguru import logger
@@ -71,6 +72,48 @@ async def _enviar_proof_ttv(page: Page, url_task: str, proof: str) -> bool:
             return True
 
     return False
+
+
+
+def _url_tiene_mw_camp_valido(url: str, tarea_id: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        camp = (qs.get("mw_camp") or [""])[0].strip()
+        if not camp:
+            return False
+        # Evitar patrón inválido detectado en producción: mw_camp igual al task id
+        if camp == tarea_id:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _resolver_url_verificacion(detalle: dict, tarea_id: str) -> str:
+    links = detalle.get("todos_los_links", []) or []
+
+    # 1) URL explícita del scraper
+    candidata = (detalle.get("url_verificacion") or "").strip()
+    if candidata and _url_tiene_mw_camp_valido(candidata, tarea_id):
+        return candidata
+
+    # 2) Links externos con mw_camp válido
+    for u in links:
+        if "mw_camp=" in u and _url_tiene_mw_camp_valido(u, tarea_id):
+            return u
+
+    # 3) Fallback seguro: links wizardly reales (sin inventar query)
+    for u in links:
+        ul = u.lower()
+        if "wizardly" in ul and ("/mw.php" in ul or "mw_" in ul):
+            # si trae mw_camp inválido, descartar también en fallback
+            if "mw_camp=" in u and not _url_tiene_mw_camp_valido(u, tarea_id):
+                continue
+            return u
+
+    # No usar texto libre de instrucciones para construir URL (falsos positivos)
+    return ""
 
 async def ejecutar_tarea(page: Page, tarea: Tarea) -> bool:
     logger.info(f"Ejecutando tarea: {tarea.titulo[:60]} | Pago: ${tarea.pago:.2f}")
@@ -297,7 +340,7 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea):
                 cod = (
                     re.search(r'c[oó]digo[:\s]+([A-Z0-9]{3,20})', texto_pag, re.I) or
                     re.search(r'code[:\s]+([A-Z0-9]{3,20})', texto_pag, re.I) or
-                    re.search(r'\b([A-Z0-9]{5,12})\b', texto_pag)
+                    re.search(r'([A-Z0-9]{5,12})', texto_pag)
                 )
                 codigo = cod.group(1).strip() if cod else url_visitada
                 logger.info(f"Proof: {codigo}")
@@ -369,6 +412,19 @@ async def _tarea_search_visit_auto(page: Page, tarea: Tarea) -> bool:
         if detalle.get("expirada"):
             return False
 
+        mw_wid = os.getenv("MW_WID", "").strip()
+        url_verificacion = _resolver_url_verificacion(detalle, tarea.id)
+
+        if url_verificacion and "mw_wid=" not in url_verificacion and mw_wid:
+            sep = "&" if "?" in url_verificacion else "?"
+            url_verificacion = f"{url_verificacion}{sep}mw_wid={mw_wid}"
+
+        if not url_verificacion:
+            logger.warning(
+                f"No se encontró URL de verificación válida para {tarea.id}. "
+                "Se evita fallback inventado para no abrir 404."
+            )
+            return False
         instrucciones = detalle.get("instrucciones", "")
         links = detalle.get("todos_los_links", []) or []
         mw_wid = os.getenv("MW_WID", "").strip()
@@ -405,7 +461,7 @@ async def _tarea_search_visit_auto(page: Page, tarea: Tarea) -> bool:
         else:
             url_verificacion = url_match.group(0).strip()
 
-        logger.info(f"URL verificación: {url_verificacion}")
+        logger.info(f"URL verificación real: {url_verificacion}")
         await page.goto(url_verificacion, wait_until="networkidle", timeout=30000)
         await asyncio.sleep(random.uniform(2, 3))
 
@@ -457,8 +513,8 @@ async def _tarea_search_visit_auto(page: Page, tarea: Tarea) -> bool:
         texto_actual = await page.inner_text("body")
         cod = (
             re.search(r'verification\s*code[:\s]+([A-Z0-9]{4,20})', texto_actual, re.I) or
-            re.search(r'\bcode[:\s]+([A-Z0-9]{4,20})\b', texto_actual, re.I) or
-            re.search(r'\b([A-Z0-9]{6,12})\b', texto_actual)
+            re.search(r'code[:\s]+([A-Z0-9]{4,20})', texto_actual, re.I) or
+            re.search(r'([A-Z0-9]{6,12})', texto_actual)
         )
 
         if not cod:

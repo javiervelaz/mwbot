@@ -87,6 +87,11 @@ class Tarea:
 def es_automatizable(titulo: str) -> bool:
     texto = titulo.lower()
 
+    # Excluir siempre primero (con fallback defensivo por si helper no está cargado)
+    matcher = globals().get("_match_patron_texto")
+    if matcher is None:
+        matcher = lambda txt, pat: pat in txt
+    if any(matcher(texto, e) for e in EXCLUIR_SI_CONTIENE):
     # Excluir siempre primero
     if any(_match_patron_texto(texto, e) for e in EXCLUIR_SI_CONTIENE):
         return False
@@ -95,6 +100,11 @@ def es_automatizable(titulo: str) -> bool:
     if any(t in texto for t in TIPOS_AUTOMATIZABLES):
         return True
 
+    # TTV se habilita por env, porque suele tener baja tasa de completado real
+    if re.match(r"^\s*ttv\b", texto):
+        if not ENABLE_TTV_AUTOMATION:
+            return False
+        if any(x in texto for x in EXCLUIR_TTV_TITULO):
     # Aceptar TTV de tipo search+visit/engage (sin obtain info, sin screenshot)
     if re.match(r"^\s*ttv\b", texto):
         if any(e in texto for e in EXCLUIR_TTV_TITULO):
@@ -199,6 +209,10 @@ async def obtener_tareas(page: Page, min_pago: float = 0.04, max_paginas: int = 
 
         tareas_ttv = sum(1 for t in tareas if t.es_ttv)
         tareas_auto = sum(1 for t in tareas if "automatic verification" in t.titulo.lower())
+        tareas_no_ttv = len(tareas) - tareas_ttv
+        logger.info(
+            f"Tareas automatizables encontradas: {len(tareas)} "
+            f"(auto_verification={tareas_auto}, no_ttv={tareas_no_ttv}, ttv={tareas_ttv})"
         logger.info(
             f"Tareas automatizables encontradas: {len(tareas)} "
             f"(auto_verification={tareas_auto}, ttv={tareas_ttv})"
