@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import random
+import os
 from pathlib import Path
 from loguru import logger
 from playwright.async_api import Page
@@ -397,7 +398,14 @@ async def _tarea_search_visit_auto(page: Page, tarea: Tarea) -> bool:
             )
             return False
 
-        logger.info(f"URL verificación real: {url_verificacion}")
+        url_match = re.search(r'https?://\S+mw_camp=\S+', instrucciones)
+        if not url_match:
+            wid = os.getenv("MW_WORKER_ID", "eb815323")
+            url_verificacion = f"https://wizardly1.com/mw.php?mw_camp={tarea.id}&mw_wid={wid}"
+        else:
+            url_verificacion = url_match.group(0).strip()
+
+        logger.info(f"URL verificación: {url_verificacion}")
         await page.goto(url_verificacion, wait_until="networkidle", timeout=30000)
         await asyncio.sleep(random.uniform(2, 3))
 
