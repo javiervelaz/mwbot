@@ -26,6 +26,18 @@ TIPOS_TTV_AUTOMATIZABLES = [
     "buscar + visitar",
 ]
 
+# Trabajos no-TTV básicos que solemos poder completar
+PATRONES_VISITA_BASICA = [
+    "visit website",
+    "visit a website",
+    "website visit",
+    "search + visit",
+    "search+visit",
+    "search and visit",
+    "google and visit",
+    "bing and visit",
+]
+
 # Excluir siempre si el título contiene esto
 EXCLUIR_SI_CONTIENE = [
     "sign up", "signup", "register", "create an account", "crear cuenta",
@@ -59,7 +71,7 @@ def es_automatizable(titulo: str) -> bool:
     texto = titulo.lower()
 
     # Excluir siempre primero
-    if any(e in texto for e in EXCLUIR_SI_CONTIENE):
+    if any(_match_patron_texto(texto, e) for e in EXCLUIR_SI_CONTIENE):
         return False
 
     # Aceptar Automatic Verification (normal, muy confiable)
@@ -72,6 +84,10 @@ def es_automatizable(titulo: str) -> bool:
             return False
         if any(t in texto for t in TIPOS_TTV_AUTOMATIZABLES):
             return True
+
+    # No-TTV básicos: ampliar universo para mejorar tasa de completado por sesión
+    if any(p in texto for p in PATRONES_VISITA_BASICA):
+        return True
 
     return False
 

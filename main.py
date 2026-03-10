@@ -34,7 +34,7 @@ async def correr_sesion():
 
     logger.info("=" * 50)
     logger.info("🤖 Iniciando sesión del bot Microworkers")
-    logger.info(f"Config: headless={headless} | max_tareas={max_tareas} | min_pago=${min_pago}")
+    logger.info(f"Config: headless={headless} | max_tareas={max_tareas} | min_pago=${min_pago} | ttv={enable_ttv}")
     logger.info("=" * 50)
 
     tareas_completadas = 0
