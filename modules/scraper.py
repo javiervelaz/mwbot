@@ -51,11 +51,28 @@ EXCLUIR_SI_CONTIENE = [
 
 
 
+
 # TTV de baja señal/alta tasa de lock para este bot
 EXCLUIR_TTV_TITULO = [
     "int page",
     "+ bonus",
 ]
+
+
+ENABLE_TTV_AUTOMATION = os.getenv("ENABLE_TTV_AUTOMATION", "false").lower() == "true"
+
+
+
+def _match_patron_texto(texto: str, patron: str) -> bool:
+    """Evita falsos positivos por substring (ej: 'share' dentro de 'search')."""
+    p = patron.lower().strip()
+    if not p:
+        return False
+    # Palabras cortas o simples: match por borde de palabra
+    if " " not in p and len(p) <= 6:
+        return bool(re.search(rf"\b{re.escape(p)}\b", texto))
+    # Frases: substring normal
+    return p in texto
 
 @dataclass
 class Tarea:
