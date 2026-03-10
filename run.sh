@@ -55,6 +55,21 @@ elif [ "$MODE" = "logs" ]; then
 elif [ "$MODE" = "status" ]; then
     docker ps | grep mwbot || echo "Bot no está corriendo"
 
+elif [ "$MODE" = "clean-processed" ]; then
+    echo "🧹 Limpiando tareas procesadas de TinyDB..."
+    if [ -d venv ]; then
+        source venv/bin/activate
+    fi
+    python3 main.py clean-processed
+
+elif [ "$MODE" = "reset-db" ]; then
+    echo "⚠️  Reseteando DB completa (tareas + sesiones)..."
+    if [ -d venv ]; then
+        source venv/bin/activate
+    fi
+    python3 main.py reset-db
+
+
 else
-    echo "Uso: ./run.sh [docker|local|stop|logs|status]"
+    echo "Uso: ./run.sh [docker|local|stop|logs|status|clean-processed|reset-db]"
 fi

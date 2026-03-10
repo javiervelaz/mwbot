@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 import random
 from dataclasses import dataclass
@@ -18,9 +19,20 @@ TIPOS_AUTOMATIZABLES = [
 # Tipos TTV que aceptamos intentar
 TIPOS_TTV_AUTOMATIZABLES = [
     "search + visit",
-    "search + engage",
     "search+visit",
     "buscar + visitar",
+]
+
+# Trabajos no-TTV básicos que solemos poder completar
+PATRONES_VISITA_BASICA = [
+    "visit website",
+    "visit a website",
+    "website visit",
+    "search + visit",
+    "search+visit",
+    "search and visit",
+    "google and visit",
+    "bing and visit",
 ]
 
 # Excluir siempre si el título contiene esto
@@ -35,6 +47,28 @@ EXCLUIR_SI_CONTIENE = [
 ]
 
 
+
+# TTV de baja señal/alta tasa de lock para este bot
+EXCLUIR_TTV_TITULO = [
+    "int page",
+    "+ bonus",
+]
+
+ENABLE_TTV_AUTOMATION = os.getenv("ENABLE_TTV_AUTOMATION", "false").lower() == "true"
+
+
+
+def _match_patron_texto(texto: str, patron: str) -> bool:
+    """Evita falsos positivos por substring (ej: 'share' dentro de 'search')."""
+    p = patron.lower().strip()
+    if not p:
+        return False
+    # Palabras cortas o simples: match por borde de palabra
+    if " " not in p and len(p) <= 6:
+        return bool(re.search(rf"\b{re.escape(p)}\b", texto))
+    # Frases: substring normal
+    return p in texto
+
 @dataclass
 class Tarea:
     id: str
@@ -48,18 +82,29 @@ class Tarea:
 def es_automatizable(titulo: str) -> bool:
     texto = titulo.lower()
 
-    # Excluir siempre primero
-    if any(e in texto for e in EXCLUIR_SI_CONTIENE):
+    # Excluir siempre primero (con fallback defensivo por si helper no está cargado)
+    matcher = globals().get("_match_patron_texto")
+    if matcher is None:
+        matcher = lambda txt, pat: pat in txt
+    if any(matcher(texto, e) for e in EXCLUIR_SI_CONTIENE):
         return False
 
     # Aceptar Automatic Verification (normal, muy confiable)
     if any(t in texto for t in TIPOS_AUTOMATIZABLES):
         return True
 
-    # Aceptar TTV de tipo search+visit/engage (sin obtain info, sin screenshot)
-    if texto.startswith("ttv-") or texto.startswith("ttv "):
+    # TTV se habilita por env, porque suele tener baja tasa de completado real
+    if re.match(r"^\s*ttv\b", texto):
+        if not ENABLE_TTV_AUTOMATION:
+            return False
+        if any(x in texto for x in EXCLUIR_TTV_TITULO):
+            return False
         if any(t in texto for t in TIPOS_TTV_AUTOMATIZABLES):
             return True
+
+    # No-TTV básicos: ampliar universo para mejorar tasa de completado por sesión
+    if any(p in texto for p in PATRONES_VISITA_BASICA):
+        return True
 
     return False
 
@@ -68,7 +113,7 @@ async def _extraer_tareas_pagina(page: Page) -> list:
     return await page.evaluate("""
         () => {
             const tareas = [];
-            document.querySelectorAll('div.jobslist').forEach((el) => {
+            document.querySelectorAll("div.jobslist, .jobslist, [id^='campaign']").forEach((el) => {
                 const idAttr = el.id || '';
                 const id = idAttr.replace('campaign', '');
                 const link = el.querySelector('.jobname a');
@@ -96,11 +141,12 @@ async def obtener_tareas(page: Page, min_pago: float = 0.04, max_paginas: int = 
             await page.goto(url, wait_until="networkidle")
             await asyncio.sleep(random.uniform(2, 3))
 
+            lista_selector = "div.jobslist, .jobslist, [id^='campaign']"
             try:
-                await page.wait_for_selector("div.jobslist", timeout=10000)
+                await page.wait_for_selector(lista_selector, timeout=10000)
             except Exception:
-                logger.warning(f"No hay tareas en página {pagina}, deteniendo")
-                break
+                logger.warning(f"No se detectó listado de tareas en página {pagina}, continuando")
+                continue
 
             items_raw = await _extraer_tareas_pagina(page)
             logger.info(f"  Página {pagina}: {len(items_raw)} tareas encontradas")
@@ -142,13 +188,22 @@ async def obtener_tareas(page: Page, min_pago: float = 0.04, max_paginas: int = 
                 break
             await asyncio.sleep(random.uniform(1, 2))
 
-        # Ordenar: Automatic Verification primero (más confiables), luego por pago
+        # Ordenar por confiabilidad:
+        # 1) Automatic Verification
+        # 2) No-TTV
+        # 3) pago
         tareas.sort(key=lambda t: (
-            2 if "automatic verification" in t.titulo.lower() else 1,
+            3 if "automatic verification" in t.titulo.lower() else (2 if not t.es_ttv else 1),
             t.pago
         ), reverse=True)
 
-        logger.info(f"Tareas automatizables encontradas: {len(tareas)}")
+        tareas_ttv = sum(1 for t in tareas if t.es_ttv)
+        tareas_auto = sum(1 for t in tareas if "automatic verification" in t.titulo.lower())
+        tareas_no_ttv = len(tareas) - tareas_ttv
+        logger.info(
+            f"Tareas automatizables encontradas: {len(tareas)} "
+            f"(auto_verification={tareas_auto}, no_ttv={tareas_no_ttv}, ttv={tareas_ttv})"
+        )
         for t in tareas[:15]:
             logger.info(f"  → ${t.pago:.2f} | {t.titulo[:60]}")
         return tareas
@@ -194,6 +249,55 @@ async def _obtener_keyword_dinamica(page: Page, url_keyword: str) -> str:
     except Exception as e:
         logger.error(f"Error obteniendo keyword dinámica de {url_keyword}: {e}")
     return ""
+
+
+def _normalizar_keyword(keyword: str) -> str:
+    texto = (keyword or "").strip().strip("\"'`")
+    texto = re.sub(r"\s+", " ", texto)
+    texto = re.split(r"\b(note|please|step|it will be|you must|do not)\b", texto, flags=re.I)[0].strip()
+    return texto.strip(" .:-")
+
+
+def _detectar_buscador(texto: str, titulo: str) -> str:
+    blob = f"{titulo}\n{texto}".lower()
+    if "bing" in blob:
+        return "bing"
+    if "startpage" in blob:
+        return "startpage"
+    return "google"
+
+
+async def _extraer_texto_ttv_enriquecido(page: Page) -> str:
+    """Intenta recuperar más texto útil cuando taskv2 aún no renderiza completo."""
+    texto = await page.evaluate("() => document.body.innerText")
+    if len(texto.strip()) > 450:
+        return texto
+
+    # Espera render adicional
+    await asyncio.sleep(5)
+    texto2 = await page.evaluate("() => document.body.innerText")
+    if len(texto2.strip()) > len(texto.strip()):
+        texto = texto2
+
+    # Extrae secciones que a veces quedan fuera del body principal
+    extra = await page.evaluate("""
+        () => {
+            const sels = ['.task-description', '.instructions', '.task-card', '.content', '#app'];
+            const parts = [];
+            for (const sel of sels) {
+                for (const el of document.querySelectorAll(sel)) {
+                    const t = (el.innerText || '').trim();
+                    if (t.length > 20) parts.push(t);
+                }
+            }
+            return parts.join('\n');
+        }
+    """)
+
+    if extra:
+        texto = (texto + "\n" + extra).strip()
+
+    return texto
 
 
 async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
@@ -263,28 +367,25 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                 logger.warning(f"Tarea {tarea.id} no redirigió a taskv2 (URL: {url_task})")
                 return {"expirada": True, "es_ttv": True}
 
-            # Esperar render React/Vue
+            # Esperar render React/Vue y enriquecer texto si viene incompleto
             await asyncio.sleep(random.uniform(2, 4))
-            texto = await page.evaluate("() => document.body.innerText")
-
-            # Si el texto es muy corto esperar más
-            if len(texto.strip()) < 100:
-                logger.debug(f"Texto corto ({len(texto)} chars), esperando render...")
-                await asyncio.sleep(4)
-                texto = await page.evaluate("() => document.body.innerText")
+            texto = await _extraer_texto_ttv_enriquecido(page)
 
             logger.debug(f"Texto taskv2 ({len(texto)} chars): {texto[:500]}")
 
-            # ── Extraer keyword ──────────────────────────────────────────
+            # ── Extraer keyword ─────────────────────────────────────────-
             kw_match = (
-                re.search(r'Search(?:ing)?\s+(?:for|keyword)[:\s]*["\']?([^\n"\']{3,80})', texto, re.I) or
-                re.search(r'Search Keyword\s*\n+([^\n]{3,80})', texto, re.I) or
-                re.search(r'keyword\s*(?:is|:)\s*["\']?([^\n"\']{3,80})', texto, re.I) or
-                re.search(r'(?:type|enter|write|use)\s+(?:the\s+)?keyword[:\s]+([^\n]{3,80})', texto, re.I) or
-                re.search(r'search\s+(?:for\s+)?["\']([^"\']{3,80})["\']', texto, re.I) or
-                re.search(r'Step\s*1[^:]*:\s*(?:Search|Go to)[^:]*["\']([^"\']{3,80})["\']', texto, re.I)
+                re.search(r'Search(?:ing)?\s+(?:for|keyword)[:\s]*["\']?([^\n"\']{3,120})', texto, re.I) or
+                re.search(r'perform\s+a\s+search\s+on\s+(?:google|bing|startpage)[^:\n]*:\s*([^\n]{3,120})', texto, re.I) or
+                re.search(r'(?:on\s+)?(?:google|bing|startpage)\s*(?:bar|search)?[^:\n]*:\s*([^\n]{3,120})', texto, re.I) or
+                re.search(r'Search Keyword\s*\n+([^\n]{3,120})', texto, re.I) or
+                re.search(r'keyword\s*(?:is|:)\s*["\']?([^\n"\']{3,120})', texto, re.I) or
+                re.search(r'(?:type|enter|write|use)\s+(?:the\s+)?keyword[:\s]+([^\n]{3,120})', texto, re.I) or
+                re.search(r'search\s+(?:for\s+)?["\']([^"\']{3,120})["\']', texto, re.I) or
+                re.search(r'Step\s*1[^:]*:\s*(?:Search|Go to)[^:]*["\']([^"\']{3,120})["\']', texto, re.I)
             )
-            keyword = kw_match.group(1).strip().strip('"\'') if kw_match else ""
+            keyword = _normalizar_keyword(kw_match.group(1)) if kw_match else ""
+            search_engine = _detectar_buscador(texto, tarea.titulo)
 
             # ── Extraer dominio destino ──────────────────────────────────
             dom_match = (
@@ -318,13 +419,18 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                     await page.goto(url_task, wait_until="networkidle")
                     await asyncio.sleep(1)
 
+            # Si no hay señales mínimas, tratar como temporal/no lista
+            if not keyword and not dominio and not links:
+                logger.warning(f"Tarea {tarea.id} sin datos útiles (render incompleto o tarea opaca), aplazando")
+                return {"bloqueada": True, "es_ttv": True, "sin_datos": True}
+
             # ── Flags de proof requerido ─────────────────────────────────
             pide_screenshot = bool(re.search(r'screenshot', texto, re.I))
             pide_social     = bool(re.search(r'social media', texto, re.I))
             pide_url        = bool(re.search(r'landing page url|paste.*url', texto, re.I))
             pide_code       = bool(re.search(r'\bcode\b|código', texto, re.I))
 
-            logger.info(f"  keyword='{keyword}' dominio='{dominio}'")
+            logger.info(f"  keyword='{keyword}' dominio='{dominio}' buscador='{search_engine}'")
             logger.info(f"  screenshot={pide_screenshot} social={pide_social} url={pide_url} code={pide_code} links={links[:3]}")
 
             return {
@@ -333,13 +439,14 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                 "texto_completo": texto[:2000],
                 "keyword": keyword,
                 "dominio_destino": dominio,
-                "url_destino": links[0] if links else "",
+                "url_destino": links[0] if links else dominio,
                 "todos_los_links": links,
                 "pide_screenshot": pide_screenshot,
                 "pide_social_media": pide_social,
                 "pide_url": pide_url,
                 "pide_code": pide_code,
                 "tiempo_requerido": "30",
+                "search_engine": search_engine,
             }
 
         # ─────────────────────────────────────────
@@ -352,16 +459,27 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                 logger.warning(f"Tarea {tarea.id} no existe (Job not found)")
                 return {"expirada": True, "es_ttv": False}
 
-            # Para Automatic Verification la URL se construye en el executor
+            # Para Automatic Verification: extraer URL real de verificación si existe
             if "automatic verification" in tarea.titulo.lower():
-                logger.info(f"  Automatic Verification: se usará wizardly1.com con id={tarea.id}")
+                links_externos = await page.evaluate("""
+                    () => Array.from(document.querySelectorAll('a[href]'))
+                        .map(a => a.href)
+                        .filter(h => h.startsWith('http') && !h.includes('microworkers'))
+                """)
+                url_verif = next((u for u in links_externos if 'mw_camp=' in u), "")
+                logger.info(
+                    f"  Automatic Verification: links={len(links_externos)} "
+                    f"url_verif={'sí' if url_verif else 'no'}"
+                )
                 return {
                     "es_ttv": False,
                     "es_automatic_verification": True,
-                    "instrucciones": body_text[:1000],
+                    "instrucciones": body_text[:2000],
                     "url_destino": "",
-                    "todos_los_links": [],
+                    "todos_los_links": links_externos,
+                    "url_verificacion": url_verif,
                     "tiempo_requerido": "30",
+                    "search_engine": "google",
                 }
 
             # Para otros tipos normales, extraer URL del jobdetailsbox
@@ -391,7 +509,8 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                 }
             """)
 
-            logger.info(f"  Normal: {len(detalle.get('todos_los_links',[]))} links, url='{detalle.get('url_destino','')}'")
+            detalle['search_engine'] = _detectar_buscador(detalle.get('instrucciones', ''), tarea.titulo)
+            logger.info(f"  Normal: {len(detalle.get('todos_los_links',[]))} links, url='{detalle.get('url_destino','')}' buscador='{detalle['search_engine']}'")
             return detalle
 
     except Exception as e:

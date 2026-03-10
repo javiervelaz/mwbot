@@ -1,6 +1,8 @@
 import asyncio
+import os
 import re
 import random
+from urllib.parse import urlparse, parse_qs
 from pathlib import Path
 from loguru import logger
 from playwright.async_api import Page
@@ -10,6 +12,107 @@ from .database import marcar_completada, marcar_bloqueada, guardar_tarea
 
 Path("screenshots").mkdir(exist_ok=True)
 
+
+def _url_buscador(search_engine: str, keyword: str) -> str:
+    q = keyword.replace(" ", "+")
+    engine = (search_engine or "google").lower()
+    if engine == "bing":
+        return f"https://www.bing.com/search?q={q}"
+    if engine == "startpage":
+        return f"https://www.startpage.com/sp/search?query={q}"
+    return f"https://www.google.com/search?q={q}"
+
+
+
+
+def _normalizar_dominio_objetivo(dominio: str) -> str:
+    d = (dominio or "").lower().strip()
+    d = d.replace("https://", "").replace("http://", "").split("/")[0]
+    d = d.replace("www.", "")
+    d = d.replace("*", "")
+    return d
+
+
+async def _enviar_proof_ttv(page: Page, url_task: str, proof: str) -> bool:
+    if not url_task:
+        return False
+
+    await page.goto(url_task, wait_until="networkidle")
+    await asyncio.sleep(2)
+
+    campos = await page.query_selector_all("input[type='text'], input[type='url'], textarea")
+    if not campos:
+        logger.warning("No se encontraron campos de proof en la tarea TTV")
+        return False
+
+    llenado = False
+    for campo in campos:
+        ph = ((await campo.get_attribute("placeholder")) or "").lower()
+        fid = ((await campo.get_attribute("id")) or "").lower()
+        name = ((await campo.get_attribute("name")) or "").lower()
+        if any(w in (ph + fid + name) for w in ["url", "landing", "paste", "proof", "answer", "code"]):
+            await campo.fill(proof)
+            llenado = True
+            break
+
+    if not llenado:
+        await campos[0].fill(proof)
+
+    for sel in ["button:has-text('Finish')", "button:has-text('Submit')", "input[type='submit']", ".btn-success", ".btn-primary"]:
+        btn = await page.query_selector(sel)
+        if not btn:
+            continue
+
+        txt = (await btn.inner_text() or "").lower().strip()
+        val = ((await btn.get_attribute("value")) or "").lower().strip()
+        if any(w in (txt + " " + val) for w in ["finish", "submit", "send", "enviar", "done", "complete"]):
+            await btn.click()
+            await asyncio.sleep(3)
+            return True
+
+    return False
+
+
+
+def _url_tiene_mw_camp_valido(url: str, tarea_id: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        camp = (qs.get("mw_camp") or [""])[0].strip()
+        if not camp:
+            return False
+        # Evitar patrón inválido detectado en producción: mw_camp igual al task id
+        if camp == tarea_id:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _resolver_url_verificacion(detalle: dict, tarea_id: str) -> str:
+    links = detalle.get("todos_los_links", []) or []
+
+    # 1) URL explícita del scraper
+    candidata = (detalle.get("url_verificacion") or "").strip()
+    if candidata and _url_tiene_mw_camp_valido(candidata, tarea_id):
+        return candidata
+
+    # 2) Links externos con mw_camp válido
+    for u in links:
+        if "mw_camp=" in u and _url_tiene_mw_camp_valido(u, tarea_id):
+            return u
+
+    # 3) Fallback seguro: links wizardly reales (sin inventar query)
+    for u in links:
+        ul = u.lower()
+        if "wizardly" in ul and ("/mw.php" in ul or "mw_" in ul):
+            # si trae mw_camp inválido, descartar también en fallback
+            if "mw_camp=" in u and not _url_tiene_mw_camp_valido(u, tarea_id):
+                continue
+            return u
+
+    # No usar texto libre de instrucciones para construir URL (falsos positivos)
+    return ""
 
 async def ejecutar_tarea(page: Page, tarea: Tarea) -> bool:
     logger.info(f"Ejecutando tarea: {tarea.titulo[:60]} | Pago: ${tarea.pago:.2f}")
@@ -88,46 +191,64 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea):
             dominio   = detalle.get("dominio_destino", "")
             url_task  = detalle.get("url_task", "")
             pide_code = detalle.get("pide_code", False)
+            search_engine = detalle.get("search_engine", "google")
 
             if not keyword:
-                logger.warning(f"Sin keyword en tarea TTV {tarea.id}")
-                return False, False
+                if dominio or detalle.get("url_destino", ""):
+                    logger.warning(f"Sin keyword en TTV {tarea.id}; usando fallback directo por dominio/url")
+                    keyword = ""
+                elif detalle.get("sin_datos"):
+                    logger.warning(f"Sin datos de instrucciones en TTV {tarea.id}; reintento diferido")
+                    return False, True
+                else:
+                    logger.warning(f"Sin keyword en tarea TTV {tarea.id}")
+                    return False, False
 
-            logger.info(f"TTV Search: keyword='{keyword}' dominio='{dominio}'")
-
-            await page.goto(
-                f"https://www.google.com/search?q={keyword.replace(' ', '+')}",
-                wait_until="networkidle"
-            )
-            await asyncio.sleep(random.uniform(2, 4))
-            await scroll_humano(page)
+            logger.info(f"TTV Search: keyword='{keyword}' dominio='{dominio}' buscador='{search_engine}'")
 
             url_visitada = ""
+            if keyword:
+                await page.goto(
+                    _url_buscador(search_engine, keyword),
+                    wait_until="networkidle"
+                )
+                await asyncio.sleep(random.uniform(2, 4))
+                await scroll_humano(page)
 
             if dominio:
-                dominio_limpio = dominio.replace("https://","").replace("http://","").split("/")[0]
+                dominio_limpio = _normalizar_dominio_objetivo(dominio)
                 links_res = await page.evaluate(f"""
                     () => Array.from(document.querySelectorAll('a[href]'))
                         .map(a => a.href)
-                        .filter(h => h.includes('{dominio_limpio}') && h.startsWith('http'))
+                        .filter(h => h.startsWith('http') && h.toLowerCase().includes('{dominio_limpio}'))
                 """)
-                if not links_res:
-                    await page.goto(
-                        f"https://www.google.com/search?q={keyword.replace(' ','+')}&start=10",
-                        wait_until="networkidle"
-                    )
+                if not links_res and keyword:
+                    if (search_engine or "google").lower() == "bing":
+                        await page.goto(
+                            f"https://www.bing.com/search?q={keyword.replace(' ','+')}&first=11",
+                            wait_until="networkidle"
+                        )
+                    else:
+                        await page.goto(
+                            f"https://www.google.com/search?q={keyword.replace(' ','+')}&start=10",
+                            wait_until="networkidle"
+                        )
                     await asyncio.sleep(2)
                     links_res = await page.evaluate(f"""
                         () => Array.from(document.querySelectorAll('a[href]'))
                             .map(a => a.href)
-                            .filter(h => h.includes('{dominio_limpio}') && h.startsWith('http'))
+                            .filter(h => h.startsWith('http') && h.toLowerCase().includes('{dominio_limpio}'))
                     """)
                 if links_res:
                     url_visitada = links_res[0]
                     logger.info(f"Resultado: {url_visitada}")
                     await page.goto(url_visitada, wait_until="networkidle", timeout=30000)
+                elif not keyword:
+                    url_visitada = dominio if dominio.startswith("http") else f"https://{dominio_limpio}"
+                    logger.info(f"Sin keyword; visitando dominio directo: {url_visitada}")
+                    await page.goto(url_visitada, wait_until="networkidle", timeout=30000)
                 else:
-                    logger.warning(f"No se encontró dominio {dominio_limpio} en Google")
+                    logger.warning(f"No se encontró dominio {dominio_limpio} en resultados de {search_engine}")
                     return False, False
             else:
                 try:
@@ -155,35 +276,11 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea):
                     logger.info(f"Código: {codigo}")
 
             if url_task:
-                await page.goto(url_task, wait_until="networkidle")
-                await asyncio.sleep(2)
-
                 proof = codigo if codigo else url_visitada
-
-                campos = await page.query_selector_all("input[type='text'], input[type='url'], textarea")
-                llenado = False
-                for campo in campos:
-                    ph = (await campo.get_attribute("placeholder") or "").lower()
-                    fid = (await campo.get_attribute("id") or "").lower()
-                    if any(w in ph+fid for w in ["url", "landing", "paste", "proof", "answer", "code"]):
-                        await campo.fill(proof)
-                        logger.info(f"Campo llenado: {proof[:60]}")
-                        llenado = True
-                        break
-                if not llenado and campos:
-                    await campos[0].fill(proof)
-                    llenado = True
-
-                for sel in ["button:has-text('Finish')", "button:has-text('Submit')",
-                            "input[type='submit']", ".btn-success", ".btn-primary"]:
-                    btn = await page.query_selector(sel)
-                    if btn:
-                        txt = (await btn.inner_text()).lower()
-                        if any(w in txt for w in ["finish","submit","send","enviar","done","complete"]):
-                            await btn.click()
-                            await asyncio.sleep(3)
-                            logger.success(f"✓ TTV submitada: {tarea.titulo[:50]}")
-                            return True, False
+                enviado = await _enviar_proof_ttv(page, url_task, proof)
+                if enviado:
+                    logger.success(f"✓ TTV submitada: {tarea.titulo[:50]}")
+                    return True, False
 
             return False, False
 
@@ -195,12 +292,13 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea):
             keyword     = detalle.get("keyword", "")
             url_destino = detalle.get("url_destino", "")
             instrucciones = detalle.get("instrucciones", "")
+            search_engine = detalle.get("search_engine", "google")
 
             if es_palabra_clave and keyword:
-                logger.info(f"Palabra Clave: keyword='{keyword}' url='{url_destino}'")
+                logger.info(f"Palabra Clave: keyword='{keyword}' url='{url_destino}' buscador='{search_engine}'")
 
                 await page.goto(
-                    f"https://www.google.com/search?q={keyword.replace(' ', '+')}",
+                    _url_buscador(search_engine, keyword),
                     wait_until="networkidle"
                 )
                 await asyncio.sleep(random.uniform(2, 4))
@@ -241,7 +339,7 @@ async def _tarea_visitar_url(page: Page, tarea: Tarea):
                 cod = (
                     re.search(r'c[oó]digo[:\s]+([A-Z0-9]{3,20})', texto_pag, re.I) or
                     re.search(r'code[:\s]+([A-Z0-9]{3,20})', texto_pag, re.I) or
-                    re.search(r'\b([A-Z0-9]{5,12})\b', texto_pag)
+                    re.search(r'([A-Z0-9]{5,12})', texto_pag)
                 )
                 codigo = cod.group(1).strip() if cod else url_visitada
                 logger.info(f"Proof: {codigo}")
@@ -313,15 +411,21 @@ async def _tarea_search_visit_auto(page: Page, tarea: Tarea) -> bool:
         if detalle.get("expirada"):
             return False
 
-        instrucciones = detalle.get("instrucciones", "")
+        mw_wid = os.getenv("MW_WID", "").strip()
+        url_verificacion = _resolver_url_verificacion(detalle, tarea.id)
 
-        url_match = re.search(r'https?://\S+mw_camp=\S+', instrucciones)
-        if not url_match:
-            url_verificacion = f"https://wizardly1.com/mw.php?mw_camp={tarea.id}&mw_wid=eb815323"
-        else:
-            url_verificacion = url_match.group(0).strip()
+        if url_verificacion and "mw_wid=" not in url_verificacion and mw_wid:
+            sep = "&" if "?" in url_verificacion else "?"
+            url_verificacion = f"{url_verificacion}{sep}mw_wid={mw_wid}"
 
-        logger.info(f"URL verificación: {url_verificacion}")
+        if not url_verificacion:
+            logger.warning(
+                f"No se encontró URL de verificación válida para {tarea.id}. "
+                "Se evita fallback inventado para no abrir 404."
+            )
+            return False
+
+        logger.info(f"URL verificación real: {url_verificacion}")
         await page.goto(url_verificacion, wait_until="networkidle", timeout=30000)
         await asyncio.sleep(random.uniform(2, 3))
 
@@ -344,9 +448,10 @@ async def _tarea_search_visit_auto(page: Page, tarea: Tarea) -> bool:
 
         keyword = kw.group(1).strip()
         url_destino = detalle.get("url_destino", "")
-        logger.info(f"Keyword: '{keyword}'")
+        search_engine = detalle.get("search_engine", "google")
+        logger.info(f"Keyword: '{keyword}' buscador='{search_engine}'")
 
-        await page.goto(f"https://www.google.com/search?q={keyword.replace(' ', '+')}",
+        await page.goto(_url_buscador(search_engine, keyword),
                         wait_until="networkidle", timeout=30000)
         await asyncio.sleep(random.uniform(2, 4))
         await scroll_humano(page)
@@ -372,8 +477,8 @@ async def _tarea_search_visit_auto(page: Page, tarea: Tarea) -> bool:
         texto_actual = await page.inner_text("body")
         cod = (
             re.search(r'verification\s*code[:\s]+([A-Z0-9]{4,20})', texto_actual, re.I) or
-            re.search(r'\bcode[:\s]+([A-Z0-9]{4,20})\b', texto_actual, re.I) or
-            re.search(r'\b([A-Z0-9]{6,12})\b', texto_actual)
+            re.search(r'code[:\s]+([A-Z0-9]{4,20})', texto_actual, re.I) or
+            re.search(r'([A-Z0-9]{6,12})', texto_actual)
         )
 
         if not cod:
