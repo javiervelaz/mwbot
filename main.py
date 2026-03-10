@@ -31,7 +31,6 @@ async def correr_sesion():
     delay_min  = int(os.getenv("DELAY_MIN", "5"))
     delay_max  = int(os.getenv("DELAY_MAX", "20"))
     max_intentos_factor = int(os.getenv("MAX_INTENTOS_FACTOR", "3"))
-    enable_ttv = os.getenv("ENABLE_TTV_AUTOMATION", "false").lower() == "true"
 
     logger.info("=" * 50)
     logger.info("🤖 Iniciando sesión del bot Microworkers")
@@ -109,7 +108,10 @@ async def correr_sesion():
             logger.error(f"Error inesperado en la sesión: {e}")
 
         finally:
-            await browser.close()
+            try:
+                await browser.close()
+            except Exception:
+                pass  # browser ya estaba cerrado/muerto
 
     guardar_sesion(tareas_completadas, ganancias_sesion)
     resumen = resumen_ganancias()
