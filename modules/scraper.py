@@ -419,15 +419,25 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
                 logger.warning(f"Tarea {tarea.id} no existe (Job not found)")
                 return {"expirada": True, "es_ttv": False}
 
-            # Para Automatic Verification la URL se construye en el executor
+            # Para Automatic Verification: extraer URL real de verificación si existe
             if "automatic verification" in tarea.titulo.lower():
-                logger.info(f"  Automatic Verification: se usará wizardly1.com con id={tarea.id}")
+                links_externos = await page.evaluate("""
+                    () => Array.from(document.querySelectorAll('a[href]'))
+                        .map(a => a.href)
+                        .filter(h => h.startsWith('http') && !h.includes('microworkers'))
+                """)
+                url_verif = next((u for u in links_externos if 'mw_camp=' in u), "")
+                logger.info(
+                    f"  Automatic Verification: links={len(links_externos)} "
+                    f"url_verif={'sí' if url_verif else 'no'}"
+                )
                 return {
                     "es_ttv": False,
                     "es_automatic_verification": True,
-                    "instrucciones": body_text[:1000],
+                    "instrucciones": body_text[:2000],
                     "url_destino": "",
-                    "todos_los_links": [],
+                    "todos_los_links": links_externos,
+                    "url_verificacion": url_verif,
                     "tiempo_requerido": "30",
                     "search_engine": "google",
                 }

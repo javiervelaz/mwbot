@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 import random
 import os
@@ -369,6 +370,33 @@ async def _tarea_search_visit_auto(page: Page, tarea: Tarea) -> bool:
             return False
 
         instrucciones = detalle.get("instrucciones", "")
+        links = detalle.get("todos_los_links", []) or []
+        mw_wid = os.getenv("MW_WID", "").strip()
+
+        # 1) Priorizar URL explícita parseada por scraper
+        url_verificacion = (detalle.get("url_verificacion") or "").strip()
+
+        # 2) Buscar en links externos del detalle
+        if not url_verificacion:
+            url_verificacion = next((u for u in links if "mw_camp=" in u), "")
+
+        # 3) Buscar en instrucciones (texto)
+        if not url_verificacion:
+            url_match = re.search(r'https?://\S*mw_camp=\S+', instrucciones)
+            if url_match:
+                url_verificacion = url_match.group(0).strip()
+
+        # 4) Si encontramos URL pero sin mw_wid, inyectar desde env (si está configurado)
+        if url_verificacion and "mw_wid=" not in url_verificacion and mw_wid:
+            sep = "&" if "?" in url_verificacion else "?"
+            url_verificacion = f"{url_verificacion}{sep}mw_wid={mw_wid}"
+
+        if not url_verificacion:
+            logger.warning(
+                f"No se encontró URL real de wizardly para {tarea.id}. "
+                "Se evita fallback inventado para no abrir 404."
+            )
+            return False
 
         url_match = re.search(r'https?://\S+mw_camp=\S+', instrucciones)
         if not url_match:
