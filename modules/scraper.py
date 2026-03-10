@@ -2,10 +2,13 @@ import asyncio
 import re
 import random
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List
 from loguru import logger
 from playwright.async_api import Page
 from .database import tarea_ya_procesada, guardar_tarea
+
+Path("screenshots").mkdir(exist_ok=True)
 
 # ─────────────────────────────────────────────
 # Tipos que SÍ podemos automatizar
@@ -64,6 +67,8 @@ def es_automatizable(titulo: str) -> bool:
 
     # Aceptar TTV de tipo search+visit/engage (sin obtain info, sin screenshot)
     if re.match(r"^\s*ttv\b", texto):
+        if any(e in texto for e in EXCLUIR_TTV_TITULO):
+            return False
         if any(t in texto for t in TIPOS_TTV_AUTOMATIZABLES):
             return True
 
@@ -292,8 +297,11 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
             url_task = page.url
             logger.info(f"  Post-accept: {url_task}")
 
-            # Redirigió a locked-jobs: ya fue aceptada/bloqueada antes
+            # Redirigió a locked-jobs
             if "locked-jobs" in url_task:
+                if "error=" in url_task:
+                    logger.warning(f"Tarea {tarea.id} error de plataforma post-accept ({url_task}), no reintentar")
+                    return {"expirada": True, "es_ttv": True}
                 logger.warning(f"Tarea {tarea.id} ya fue aceptada/bloqueada")
                 return {"bloqueada": True, "es_ttv": True}
 

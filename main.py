@@ -95,7 +95,10 @@ async def correr_sesion():
             logger.error(f"Error inesperado en la sesión: {e}")
 
         finally:
-            await browser.close()
+            try:
+                await browser.close()
+            except Exception:
+                pass  # browser ya estaba cerrado/muerto
 
     guardar_sesion(tareas_completadas, ganancias_sesion)
     resumen = resumen_ganancias()
