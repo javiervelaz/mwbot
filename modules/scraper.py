@@ -3,10 +3,13 @@ import os
 import re
 import random
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List
 from loguru import logger
 from playwright.async_api import Page
 from .database import tarea_ya_procesada, guardar_tarea
+
+Path("screenshots").mkdir(exist_ok=True)
 
 # ─────────────────────────────────────────────
 # Tipos que SÍ podemos automatizar
@@ -54,21 +57,6 @@ EXCLUIR_TTV_TITULO = [
     "+ bonus",
 ]
 
-ENABLE_TTV_AUTOMATION = os.getenv("ENABLE_TTV_AUTOMATION", "false").lower() == "true"
-
-
-
-def _match_patron_texto(texto: str, patron: str) -> bool:
-    """Evita falsos positivos por substring (ej: 'share' dentro de 'search')."""
-    p = patron.lower().strip()
-    if not p:
-        return False
-    # Palabras cortas o simples: match por borde de palabra
-    if " " not in p and len(p) <= 6:
-        return bool(re.search(rf"\b{re.escape(p)}\b", texto))
-    # Frases: substring normal
-    return p in texto
-
 @dataclass
 class Tarea:
     id: str
@@ -82,22 +70,17 @@ class Tarea:
 def es_automatizable(titulo: str) -> bool:
     texto = titulo.lower()
 
-    # Excluir siempre primero (con fallback defensivo por si helper no está cargado)
-    matcher = globals().get("_match_patron_texto")
-    if matcher is None:
-        matcher = lambda txt, pat: pat in txt
-    if any(matcher(texto, e) for e in EXCLUIR_SI_CONTIENE):
+    # Excluir siempre primero
+    if any(_match_patron_texto(texto, e) for e in EXCLUIR_SI_CONTIENE):
         return False
 
     # Aceptar Automatic Verification (normal, muy confiable)
     if any(t in texto for t in TIPOS_AUTOMATIZABLES):
         return True
 
-    # TTV se habilita por env, porque suele tener baja tasa de completado real
+    # Aceptar TTV de tipo search+visit/engage (sin obtain info, sin screenshot)
     if re.match(r"^\s*ttv\b", texto):
-        if not ENABLE_TTV_AUTOMATION:
-            return False
-        if any(x in texto for x in EXCLUIR_TTV_TITULO):
+        if any(e in texto for e in EXCLUIR_TTV_TITULO):
             return False
         if any(t in texto for t in TIPOS_TTV_AUTOMATIZABLES):
             return True
@@ -199,10 +182,9 @@ async def obtener_tareas(page: Page, min_pago: float = 0.04, max_paginas: int = 
 
         tareas_ttv = sum(1 for t in tareas if t.es_ttv)
         tareas_auto = sum(1 for t in tareas if "automatic verification" in t.titulo.lower())
-        tareas_no_ttv = len(tareas) - tareas_ttv
         logger.info(
             f"Tareas automatizables encontradas: {len(tareas)} "
-            f"(auto_verification={tareas_auto}, no_ttv={tareas_no_ttv}, ttv={tareas_ttv})"
+            f"(auto_verification={tareas_auto}, ttv={tareas_ttv})"
         )
         for t in tareas[:15]:
             logger.info(f"  → ${t.pago:.2f} | {t.titulo[:60]}")
@@ -340,8 +322,11 @@ async def obtener_detalle_tarea(page: Page, tarea: Tarea) -> dict:
             url_task = page.url
             logger.info(f"  Post-accept: {url_task}")
 
-            # Redirigió a locked-jobs: ya fue aceptada/bloqueada antes
+            # Redirigió a locked-jobs
             if "locked-jobs" in url_task:
+                if "error=" in url_task:
+                    logger.warning(f"Tarea {tarea.id} error de plataforma post-accept ({url_task}), no reintentar")
+                    return {"expirada": True, "es_ttv": True}
                 logger.warning(f"Tarea {tarea.id} ya fue aceptada/bloqueada")
                 return {"bloqueada": True, "es_ttv": True}
 
