@@ -1,11 +1,15 @@
 import asyncio
 import random
 import os
+import sys
 from dotenv import load_dotenv
 from loguru import logger
 from playwright.async_api import async_playwright
 
-from modules.database import init_db, depurar_db, guardar_sesion, resumen_ganancias
+from modules.database import (
+    init_db, depurar_db, guardar_sesion, resumen_ganancias,
+    limpiar_tareas_procesadas, reset_db_total
+)
 from modules.auth import login, verificar_sesion_activa
 from modules.scraper import obtener_tareas
 from modules.executor import ejecutar_tarea
@@ -26,10 +30,12 @@ async def correr_sesion():
     min_pago   = float(os.getenv("MIN_PAGO", "0.05"))
     delay_min  = int(os.getenv("DELAY_MIN", "5"))
     delay_max  = int(os.getenv("DELAY_MAX", "20"))
+    max_intentos_factor = int(os.getenv("MAX_INTENTOS_FACTOR", "3"))
+    enable_ttv = os.getenv("ENABLE_TTV_AUTOMATION", "false").lower() == "true"
 
     logger.info("=" * 50)
     logger.info("🤖 Iniciando sesión del bot Microworkers")
-    logger.info(f"Config: headless={headless} | max_tareas={max_tareas} | min_pago=${min_pago}")
+    logger.info(f"Config: headless={headless} | max_tareas={max_tareas} | min_pago=${min_pago} | ttv={enable_ttv}")
     logger.info("=" * 50)
 
     tareas_completadas = 0
@@ -62,13 +68,25 @@ async def correr_sesion():
                 logger.warning("No hay tareas automatizables disponibles.")
                 return
 
-            limite = min(len(tareas), max_tareas)
-            logger.info(f"Vamos a ejecutar hasta {limite} tareas")
+            max_intentos = min(len(tareas), max_tareas * max_intentos_factor)
+            logger.info(
+                f"Objetivo: completar hasta {max_tareas} tareas "
+                f"(máx intentos={max_intentos}, factor={max_intentos_factor})"
+            )
 
-            for i, tarea in enumerate(tareas[:max_tareas]):
-                logger.info(f"\n--- Tarea {i+1} de {limite} ---")
+            intentos = 0
+            for tarea in tareas:
+                if tareas_completadas >= max_tareas:
+                    logger.info("Objetivo de tareas completadas alcanzado")
+                    break
+                if intentos >= max_intentos:
+                    logger.info("Se alcanzó el máximo de intentos configurado para la sesión")
+                    break
 
-                if i > 0 and i % 10 == 0:
+                intentos += 1
+                logger.info(f"\n--- Intento {intentos} de {max_intentos} ---")
+
+                if intentos > 1 and intentos % 10 == 0:
                     sesion_ok = await verificar_sesion_activa(page)
                     if not sesion_ok:
                         logger.warning("Sesión expirada, reintentando login...")
@@ -106,6 +124,12 @@ async def correr_sesion():
 
 async def main():
     init_db()
+
+    if os.getenv("RESET_DB_TOTAL_AL_INICIO", "false").lower() == "true":
+        reset_db_total()
+    elif os.getenv("RESET_TAREAS_AL_INICIO", "false").lower() == "true":
+        limpiar_tareas_procesadas()
+
     depurar_db()  # ← limpia pendientes atascadas al arrancar
 
     logger.info("Bot iniciado en modo 24/7")
@@ -122,4 +146,11 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    if len(sys.argv) > 1 and sys.argv[1] in ("clean-processed", "reset-db"):
+        init_db()
+        if sys.argv[1] == "clean-processed":
+            limpiar_tareas_procesadas()
+        else:
+            reset_db_total()
+    else:
+        asyncio.run(main())

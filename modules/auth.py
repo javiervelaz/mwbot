@@ -29,21 +29,27 @@ async def login(page: Page) -> bool:
         await page.goto("https://microworkers.com/login.php", wait_until="networkidle")
         await asyncio.sleep(random.uniform(1.5, 3.0))
 
-        await page.wait_for_selector("input#Email", timeout=15000)
+        email_selector = "input#Email, input#email, input[name='Email'], input[name='email'], input[type='email']"
+        password_selector = "input#Password, input#password, input[name='Password'], input[name='password'], input[type='password']"
 
-        await page.click("input#Email")
+        await page.wait_for_selector(email_selector, timeout=15000)
+
+        await page.click(email_selector)
         await asyncio.sleep(random.uniform(0.3, 0.8))
-        await page.type("input#Email", email, delay=random.randint(60, 120))
+        await page.fill(email_selector, "")
+        await page.type(email_selector, email, delay=random.randint(60, 120))
 
         await asyncio.sleep(random.uniform(0.5, 1.2))
 
-        await page.click("input#Password")
+        await page.click(password_selector)
         await asyncio.sleep(random.uniform(0.3, 0.8))
-        await page.type("input#Password", password, delay=random.randint(50, 100))
+        await page.fill(password_selector, "")
+        await page.type(password_selector, password, delay=random.randint(50, 100))
 
         await asyncio.sleep(random.uniform(0.8, 1.5))
 
-        await page.click("input[name='Button'][type='submit']")
+        submit_selector = "input[name='Button'][type='submit'], button[type='submit'], input[type='submit']"
+        await page.click(submit_selector)
         await page.wait_for_load_state("networkidle", timeout=20000)
         await asyncio.sleep(2)
 
